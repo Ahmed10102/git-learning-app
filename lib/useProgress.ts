@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import type { Progress, Section, QuizResult } from './types';
-import { getSupabaseClient, getSessionId } from './supabase';
+import { getSessionId } from './supabase';
 
 const STORAGE_KEY = 'git-academy-progress';
 
@@ -25,19 +25,31 @@ export function useProgress() {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(p)); } catch { /* ignore */ }
   }, []);
 
-  const syncProgressToSupabase = useCallback(async (p: Progress, studentName?: string) => {
+  // Use fetch with keepalive so the request survives component unmount / page navigation
+  const syncProgressToSupabase = useCallback((p: Progress, studentName?: string) => {
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    if (typeof window === 'undefined' || !url || !key) return;
     try {
-      const client = getSupabaseClient();
-      if (!client) return;
       const sessionId = getSessionId();
       const name = studentName || p.quizResult?.name || 'Anonymous';
-      await client.from('student_progress').upsert({
-        session_id: sessionId,
-        student_name: name,
-        completed_sections: p.completedSections,
-        last_visited: p.lastVisited ?? null,
-        last_updated: new Date().toISOString(),
-      }, { onConflict: 'session_id' });
+      fetch(`${url}/rest/v1/student_progress`, {
+        method: 'POST',
+        keepalive: true,
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': key,
+          'Authorization': `Bearer ${key}`,
+          'Prefer': 'resolution=merge-duplicates,return=minimal',
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          student_name: name,
+          completed_sections: p.completedSections,
+          last_visited: p.lastVisited ?? null,
+          last_updated: new Date().toISOString(),
+        }),
+      }).catch(e => console.warn('Supabase progress sync failed:', e));
     } catch (e) {
       console.warn('Supabase progress sync failed (offline?):', e);
     }
@@ -52,7 +64,6 @@ export function useProgress() {
         lastVisited: section,
       };
       try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch { /* ignore */ }
-      // Sync asynchronously
       syncProgressToSupabase(next);
       return next;
     });
@@ -73,3 +84,4 @@ export function useProgress() {
 
   return { progress, markCompleted, saveQuizResult, resetProgress };
 }
+

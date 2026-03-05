@@ -53,18 +53,16 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
       completedAt: new Date().toISOString(),
     };
 
-    setResult(quizResult);
-    setPhase('finished');
-    onComplete(quizResult);
-
     if (intervalRef.current) clearInterval(intervalRef.current);
 
-    // Save to Supabase (fire-and-forget, don't block UI)
+    // Save to Supabase FIRST — before onComplete navigates the page away
     try {
       const client = getSupabaseClient();
       if (client) {
         const sessionId = getSessionId();
-        await client.from('quiz_results').insert({
+        // Use fetch directly with keepalive so the request survives component unmount
+        const url = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1/quiz_results`;
+        const payload = {
           student_name: quizName,
           session_id: sessionId,
           score,
@@ -72,11 +70,26 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
           time_taken: timeTaken,
           answers,
           question_order: order,
-        });
+        };
+        fetch(url, {
+          method: 'POST',
+          keepalive: true,
+          headers: {
+            'Content-Type': 'application/json',
+            'apikey': process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+            'Authorization': `Bearer ${process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY}`,
+            'Prefer': 'return=minimal',
+          },
+          body: JSON.stringify(payload),
+        }).catch(e => console.warn('Supabase quiz save failed:', e));
       }
     } catch (e) {
       console.warn('Supabase quiz save failed (offline?):', e);
     }
+
+    setResult(quizResult);
+    setPhase('finished');
+    onComplete(quizResult);
   }, [onComplete]);
 
   useEffect(() => {
