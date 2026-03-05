@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { supabase } from '@/lib/supabase';
+import { getSupabaseClient } from '@/lib/supabase';
 
 interface StudentProgress {
   id: string;
@@ -73,9 +73,11 @@ export default function TeacherDashboard({ onClose }: Props) {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
+      const client = getSupabaseClient();
+      if (!client) { setLoading(false); return; }
       const [{ data: prog }, { data: quiz }] = await Promise.all([
-        supabase.from('student_progress').select('*').order('last_updated', { ascending: false }),
-        supabase.from('quiz_results').select('*').order('completed_at', { ascending: false }),
+        client.from('student_progress').select('*').order('last_updated', { ascending: false }),
+        client.from('quiz_results').select('*').order('completed_at', { ascending: false }),
       ]);
       setProgressData(prog ?? []);
       setQuizData(quiz ?? []);

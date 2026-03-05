@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { QUIZ_QUESTIONS } from '@/lib/data';
 import type { QuizResult } from '@/lib/types';
-import { supabase, getSessionId } from '@/lib/supabase';
+import { getSupabaseClient, getSessionId } from '@/lib/supabase';
 
 interface QuizProps {
   onComplete: (result: QuizResult) => void;
@@ -61,16 +61,19 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
 
     // Save to Supabase (fire-and-forget, don't block UI)
     try {
-      const sessionId = getSessionId();
-      await supabase.from('quiz_results').insert({
-        student_name: quizName,
-        session_id: sessionId,
-        score,
-        total: QUIZ_QUESTIONS.length,
-        time_taken: timeTaken,
-        answers,
-        question_order: order,
-      });
+      const client = getSupabaseClient();
+      if (client) {
+        const sessionId = getSessionId();
+        await client.from('quiz_results').insert({
+          student_name: quizName,
+          session_id: sessionId,
+          score,
+          total: QUIZ_QUESTIONS.length,
+          time_taken: timeTaken,
+          answers,
+          question_order: order,
+        });
+      }
     } catch (e) {
       console.warn('Supabase quiz save failed (offline?):', e);
     }

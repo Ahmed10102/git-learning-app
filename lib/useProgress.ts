@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import type { Progress, Section, QuizResult } from './types';
-import { supabase, getSessionId } from './supabase';
+import { getSupabaseClient, getSessionId } from './supabase';
 
 const STORAGE_KEY = 'git-academy-progress';
 
@@ -27,9 +27,11 @@ export function useProgress() {
 
   const syncProgressToSupabase = useCallback(async (p: Progress, studentName?: string) => {
     try {
+      const client = getSupabaseClient();
+      if (!client) return;
       const sessionId = getSessionId();
       const name = studentName || p.quizResult?.name || 'Anonymous';
-      await supabase.from('student_progress').upsert({
+      await client.from('student_progress').upsert({
         session_id: sessionId,
         student_name: name,
         completed_sections: p.completedSections,
