@@ -32,7 +32,16 @@ interface PlaygroundState {
   staged: string[];
   modified: string[];
   untracked: string[];
+  allDiskFiles: string[]; // every file on disk (including untracked)
   lastCommand?: string;
+}
+
+// Each open tab in the editor
+interface EditorTab {
+  filename: string;
+  content: string;
+  savedContent: string; // what's currently on disk
+  isNew: boolean;
 }
 
 const INITIAL_STATE: PlaygroundState = {
@@ -44,16 +53,13 @@ const INITIAL_STATE: PlaygroundState = {
   staged: [],
   modified: [],
   untracked: [],
+  allDiskFiles: [],
 };
 
-// We need to use dynamic import for isomorphic-git due to ESM/CJS issues
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+// module-level singletons
 let git: any = null;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let LightningFS: any = null;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let fs: any = null;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let fsInstance: any = null;
 
 const DIR = '/repo';
@@ -74,6 +80,87 @@ async function ensureGitLoaded() {
   return { git: git!, fs: fs! };
 }
 
+// ── Minimal syntax-token colorizer (no external dep) ──────────────────────
+function tokenizeLine(line: string, ext: string): Array<{ text: string; color: string }> {
+  const plain = 'rgba(200,230,255,0.88)';
+  const kw = '#c792ea';
+  const str = '#c3e88d';
+  const comment = 'rgba(150,180,220,0.4)';
+  const num = '#f78c6c';
+  const tag = '#f07178';
+  const attr = '#ffcb6b';
+  const punct = 'rgba(200,230,255,0.45)';
+
+  if (ext === 'html' || ext === 'htm' || ext === 'xml' || ext === 'svg') {
+    // very simple HTML tokenizer
+    const tokens: Array<{ text: string; color: string }> = [];
+    let i = 0;
+    while (i < line.length) {
+      if (line[i] === '<') {
+        const end = line.indexOf('>', i);
+        if (end === -1) { tokens.push({ text: line.slice(i), color: tag }); break; }
+        const raw = line.slice(i, end + 1);
+        tokens.push({ text: raw, color: tag });
+        i = end + 1;
+      } else if (line[i] === '"') {
+        const end = line.indexOf('"', i + 1);
+        if (end === -1) { tokens.push({ text: line.slice(i), color: str }); break; }
+        tokens.push({ text: line.slice(i, end + 1), color: str });
+        i = end + 1;
+      } else {
+        let j = i + 1;
+        while (j < line.length && line[j] !== '<' && line[j] !== '"') j++;
+        tokens.push({ text: line.slice(i, j), color: plain });
+        i = j;
+      }
+    }
+    return tokens.length ? tokens : [{ text: line, color: plain }];
+  }
+
+  if (ext === 'css' || ext === 'scss' || ext === 'less') {
+    if (line.trimStart().startsWith('/*') || line.trimStart().startsWith('//')) return [{ text: line, color: comment }];
+    if (line.includes(':')) {
+      const idx = line.indexOf(':');
+      return [
+        { text: line.slice(0, idx + 1), color: attr },
+        { text: line.slice(idx + 1), color: str },
+      ];
+    }
+    if (line.trimStart().startsWith('{') || line.trimStart().startsWith('}')) return [{ text: line, color: punct }];
+    return [{ text: line, color: tag }];
+  }
+
+  if (ext === 'json') {
+    if (line.trimStart().startsWith('"')) {
+      const colon = line.indexOf('":');
+      if (colon !== -1) {
+        return [
+          { text: line.slice(0, colon + 2), color: attr },
+          { text: line.slice(colon + 2), color: str },
+        ];
+      }
+      return [{ text: line, color: str }];
+    }
+    if (/^\s*(true|false|null)/.test(line)) return [{ text: line, color: kw }];
+    if (/^\s*-?\d/.test(line)) return [{ text: line, color: num }];
+    return [{ text: line, color: plain }];
+  }
+
+  // JS/TS/JSX/TSX/generic
+  if (line.trimStart().startsWith('//') || line.trimStart().startsWith('#')) return [{ text: line, color: comment }];
+  const keywords = /\b(const|let|var|function|class|import|export|from|default|return|if|else|for|while|do|switch|case|break|continue|new|typeof|instanceof|async|await|try|catch|finally|throw|this|super|extends|interface|type|enum|implements|public|private|protected|static|readonly|null|undefined|true|false|void|of|in|yield|as|is)\b/g;
+  const parts: Array<{ text: string; color: string }> = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = keywords.exec(line)) !== null) {
+    if (m.index > last) parts.push({ text: line.slice(last, m.index), color: plain });
+    parts.push({ text: m[0], color: kw });
+    last = m.index + m[0].length;
+  }
+  if (last < line.length) parts.push({ text: line.slice(last), color: plain });
+  return parts.length ? parts : [{ text: line, color: plain }];
+}
+
 export default function GitPlayground({ initialCommand }: { initialCommand?: string }) {
   const [state, setState] = useState<PlaygroundState>(INITIAL_STATE);
   const [lines, setLines] = useState<TerminalLine[]>([
@@ -90,8 +177,28 @@ export default function GitPlayground({ initialCommand }: { initialCommand?: str
   const [histIdx, setHistIdx] = useState(-1);
   const [loading, setLoading] = useState(false);
   const [hintVisible, setHintVisible] = useState(false);
+
+  // ── Multi-tab editor state ────────────────────────────────────────────
+  const [tabs, setTabs] = useState<EditorTab[]>([]);
+  const [activeTab, setActiveTab] = useState<string | null>(null);
+  const [newFileName, setNewFileName] = useState('');
+  const [showNewFileForm, setShowNewFileForm] = useState(false);
+  // Inline rename state: filename being renamed → current rename input value
+  const [renamingFile, setRenamingFile] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  // Expand editor to full width (hide explorer column)
+  const [editorExpanded, setEditorExpanded] = useState(false);
+  // Context menu for file in explorer
+  const [ctxMenu, setCtxMenu] = useState<{ file: string; x: number; y: number } | null>(null);
+
+  const editorRef = useRef<HTMLTextAreaElement>(null);
+  const renameInputRef = useRef<HTMLInputElement>(null);
   const terminalBodyRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Derived: the active tab object
+  const activeTabData = tabs.find(t => t.filename === activeTab) ?? null;
+  const isDirty = activeTabData ? activeTabData.content !== activeTabData.savedContent : false;
 
   const addLine = useCallback((type: TerminalLine['type'], text: string) => {
     setLines(prev => [...prev, { type, text }]);
@@ -114,24 +221,34 @@ export default function GitPlayground({ initialCommand }: { initialCommand?: str
     }
   }, [initialCommand]);
 
+  // Close context menu on outside click
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const handler = () => setCtxMenu(null);
+    window.addEventListener('click', handler);
+    return () => window.removeEventListener('click', handler);
+  }, [ctxMenu]);
+
+  // Focus rename input when it appears
+  useEffect(() => {
+    if (renamingFile) setTimeout(() => renameInputRef.current?.focus(), 30);
+  }, [renamingFile]);
+
   const refreshStatus = useCallback(async () => {
     if (!state.initialized) return;
     try {
       const { git: g, fs: f } = await ensureGitLoaded();
-      
-      // Get current branch
+
       let branch = 'main';
       try {
         branch = await g.currentBranch({ fs: { promises: f }, dir: DIR }) || 'main';
       } catch { /* ignore */ }
 
-      // List branches
       let branches: string[] = ['main'];
       try {
         branches = await g.listBranches({ fs: { promises: f }, dir: DIR });
       } catch { /* ignore */ }
 
-      // Get log
       let commits: CommitNode[] = [];
       try {
         const log = await g.log({ fs: { promises: f }, dir: DIR });
@@ -145,14 +262,12 @@ export default function GitPlayground({ initialCommand }: { initialCommand?: str
         }));
       } catch { /* ignore */ }
 
-      // List files in repo
       let files: FileTree = {};
       try {
         const allFiles = await g.listFiles({ fs: { promises: f }, dir: DIR });
         allFiles.forEach(f => { files[f] = ''; });
       } catch { /* ignore */ }
 
-      // Status
       let staged: string[] = [];
       let modified: string[] = [];
       let untracked: string[] = [];
@@ -165,6 +280,12 @@ export default function GitPlayground({ initialCommand }: { initialCommand?: str
         }
       } catch { /* ignore */ }
 
+      let allDiskFiles: string[] = [];
+      try {
+        const entries = await f.readdir(DIR);
+        allDiskFiles = entries.filter((e: string) => e !== '.git');
+      } catch { /* ignore */ }
+
       setState(prev => ({
         ...prev,
         currentBranch: branch,
@@ -174,11 +295,140 @@ export default function GitPlayground({ initialCommand }: { initialCommand?: str
         staged,
         modified,
         untracked,
+        allDiskFiles,
       }));
+
+      // Refresh content of any open tabs that changed on disk
+      setTabs(prevTabs =>
+        prevTabs.map(tab => {
+          // We'll do the actual disk read async below; for now just keep them
+          return tab;
+        })
+      );
     } catch (e) {
       console.error('refresh status error', e);
     }
   }, [state.initialized]);
+
+  // ── Open/focus a file tab ────────────────────────────────────────────
+  const openFile = useCallback(async (filename: string) => {
+    try {
+      const { fs: f } = await ensureGitLoaded();
+      const content = await f.readFile(`${DIR}/${filename}`, { encoding: 'utf8' }) as string;
+      setTabs(prev => {
+        const exists = prev.find(t => t.filename === filename);
+        if (exists) {
+          // Refresh saved content in case it changed on disk
+          return prev.map(t => t.filename === filename ? { ...t, savedContent: content } : t);
+        }
+        return [...prev, { filename, content, savedContent: content, isNew: false }];
+      });
+      setActiveTab(filename);
+      setTimeout(() => editorRef.current?.focus(), 50);
+    } catch {
+      setTabs(prev => {
+        if (prev.find(t => t.filename === filename)) return prev;
+        return [...prev, { filename, content: '', savedContent: '', isNew: false }];
+      });
+      setActiveTab(filename);
+    }
+  }, []);
+
+  // ── Close a tab ──────────────────────────────────────────────────────
+  const closeTab = useCallback((filename: string, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    setTabs(prev => {
+      const newTabs = prev.filter(t => t.filename !== filename);
+      return newTabs;
+    });
+    setActiveTab(prev => {
+      if (prev !== filename) return prev;
+      const remaining = tabs.filter(t => t.filename !== filename);
+      return remaining.length > 0 ? remaining[remaining.length - 1].filename : null;
+    });
+  }, [tabs]);
+
+  // ── Save the active tab ──────────────────────────────────────────────
+  const saveActiveTab = useCallback(async () => {
+    if (!activeTabData) return;
+    try {
+      const { fs: f } = await ensureGitLoaded();
+      await f.writeFile(`${DIR}/${activeTabData.filename}`, activeTabData.content, { encoding: 'utf8' });
+      setTabs(prev => prev.map(t =>
+        t.filename === activeTabData.filename ? { ...t, savedContent: t.content } : t
+      ));
+      addLine('success', `✓ Saved ${activeTabData.filename}`);
+      await refreshStatus();
+    } catch (e: any) {
+      addLine('error', `Failed to save: ${e.message}`);
+    }
+  }, [activeTabData, addLine, refreshStatus]);
+
+  // ── Create a new file ────────────────────────────────────────────────
+  const createNewFile = useCallback(async (filename: string) => {
+    if (!filename.trim()) return;
+    try {
+      const { fs: f } = await ensureGitLoaded();
+      await f.writeFile(`${DIR}/${filename.trim()}`, '', { encoding: 'utf8' });
+      addLine('success', `✓ Created ${filename.trim()}`);
+      setShowNewFileForm(false);
+      setNewFileName('');
+      await refreshStatus();
+      // Open the new file in a tab
+      const tab: EditorTab = { filename: filename.trim(), content: '', savedContent: '', isNew: true };
+      setTabs(prev => {
+        if (prev.find(t => t.filename === tab.filename)) return prev;
+        return [...prev, tab];
+      });
+      setActiveTab(tab.filename);
+      setTimeout(() => editorRef.current?.focus(), 50);
+    } catch (e: any) {
+      addLine('error', `Failed to create file: ${e.message}`);
+    }
+  }, [addLine, refreshStatus]);
+
+  // ── Delete a file ────────────────────────────────────────────────────
+  const deleteFile = useCallback(async (filename: string) => {
+    try {
+      const { git: g, fs: f } = await ensureGitLoaded();
+      // If tracked, use git rm; otherwise just unlink
+      const isTracked = Object.keys(state.files).includes(filename);
+      if (isTracked) {
+        try {
+          await g.remove({ fs: { promises: f }, dir: DIR, filepath: filename });
+        } catch { /* ignore — we'll unlink anyway */ }
+      }
+      await f.unlink(`${DIR}/${filename}`);
+      addLine('success', `✓ Deleted ${filename}`);
+      // Close tab if open
+      closeTab(filename);
+      await refreshStatus();
+    } catch (e: any) {
+      addLine('error', `Failed to delete: ${e.message}`);
+    }
+  }, [state.files, addLine, closeTab, refreshStatus]);
+
+  // ── Rename a file ────────────────────────────────────────────────────
+  const commitRename = useCallback(async (oldName: string, newName: string) => {
+    setRenamingFile(null);
+    if (!newName.trim() || newName.trim() === oldName) return;
+    const trimmed = newName.trim();
+    try {
+      const { fs: f } = await ensureGitLoaded();
+      const content = await f.readFile(`${DIR}/${oldName}`, { encoding: 'utf8' }) as string;
+      await f.writeFile(`${DIR}/${trimmed}`, content, { encoding: 'utf8' });
+      await f.unlink(`${DIR}/${oldName}`);
+      addLine('success', `✓ Renamed ${oldName} → ${trimmed}`);
+      // Update tabs
+      setTabs(prev => prev.map(t =>
+        t.filename === oldName ? { ...t, filename: trimmed } : t
+      ));
+      setActiveTab(prev => prev === oldName ? trimmed : prev);
+      await refreshStatus();
+    } catch (e: any) {
+      addLine('error', `Failed to rename: ${e.message}`);
+    }
+  }, [addLine, refreshStatus]);
 
   const executeCommand = useCallback(async (rawCmd: string) => {
     const cmd = rawCmd.trim();
@@ -209,12 +459,20 @@ export default function GitPlayground({ initialCommand }: { initialCommand?: str
           { type: 'output', text: '  git switch -c <n> — Create & switch branch' },
           { type: 'output', text: '  git merge <name>  — Merge branch' },
           { type: 'output', text: '  git diff          — Show unstaged changes' },
+          { type: 'output', text: '  git restore <f>   — Discard workdir changes' },
+          { type: 'output', text: '  git rm <file>     — Remove tracked file' },
           { type: 'output', text: '  touch <file>      — Create a file' },
           { type: 'output', text: '  echo "txt" > file — Write to file' },
           { type: 'output', text: '  cat <file>        — Read file contents' },
+          { type: 'output', text: '  rm <file>         — Delete a file' },
+          { type: 'output', text: '  mv <src> <dst>    — Rename / move a file' },
           { type: 'output', text: '  ls                — List files' },
           { type: 'output', text: '  clear             — Clear terminal' },
           { type: 'output', text: '  reset             — Reset entire playground' },
+          { type: 'info', text: '' },
+          { type: 'info', text: '📝 FILE EDITOR: Click any file in the panel →' },
+          { type: 'info', text: '   double-click filename to rename it.' },
+          { type: 'info', text: '   right-click for delete / stage / unstage.' },
           { type: 'info', text: '' },
         ]);
         setLoading(false);
@@ -230,11 +488,13 @@ export default function GitPlayground({ initialCommand }: { initialCommand?: str
 
       // ── RESET ─────────────────────────────────────────────
       if (cmd === 'reset') {
-        // Wipe and reinit
         const newFs = new LightningFS!('git-playground', { wipe: true });
         fsInstance = newFs;
         fs = newFs.promises;
         setState(INITIAL_STATE);
+        setTabs([]);
+        setActiveTab(null);
+        setShowNewFileForm(false);
         setLines([
           { type: 'success', text: '✓ Playground reset! All data cleared.' },
           { type: 'info', text: 'Type "git init" to start fresh.' },
@@ -274,6 +534,45 @@ export default function GitPlayground({ initialCommand }: { initialCommand?: str
         return;
       }
 
+      // ── RM ────────────────────────────────────────────────
+      if (cmd.startsWith('rm ') && !cmd.startsWith('rm -')) {
+        const filename = cmd.slice(3).trim();
+        try {
+          await f.unlink(`${DIR}/${filename}`);
+          addLine('success', `✓ Removed ${filename}`);
+          closeTab(filename);
+          await refreshStatus();
+        } catch {
+          addLine('error', `rm: ${filename}: No such file or directory`);
+        }
+        setLoading(false);
+        return;
+      }
+
+      // ── MV ────────────────────────────────────────────────
+      if (cmd.startsWith('mv ')) {
+        const parts = cmd.slice(3).trim().split(/\s+/);
+        if (parts.length < 2) {
+          addLine('error', 'Usage: mv <source> <destination>');
+          setLoading(false);
+          return;
+        }
+        const [src, dst] = parts;
+        try {
+          const content = await f.readFile(`${DIR}/${src}`, { encoding: 'utf8' }) as string;
+          await f.writeFile(`${DIR}/${dst}`, content, { encoding: 'utf8' });
+          await f.unlink(`${DIR}/${src}`);
+          addLine('success', `✓ Renamed ${src} → ${dst}`);
+          setTabs(prev => prev.map(t => t.filename === src ? { ...t, filename: dst } : t));
+          setActiveTab(prev => prev === src ? dst : prev);
+          await refreshStatus();
+        } catch (e: any) {
+          addLine('error', `mv: ${e.message}`);
+        }
+        setLoading(false);
+        return;
+      }
+
       // ── TOUCH ─────────────────────────────────────────────
       if (cmd.startsWith('touch ')) {
         const filename = cmd.slice(6).trim();
@@ -307,6 +606,12 @@ export default function GitPlayground({ initialCommand }: { initialCommand?: str
           try {
             await f.writeFile(`${DIR}/${filename}`, content + '\n', { encoding: 'utf8' });
             addLine('success', `✓ Written to ${filename}`);
+            // Refresh tab if open
+            setTabs(prev => prev.map(t =>
+              t.filename === filename
+                ? { ...t, content: content + '\n', savedContent: content + '\n' }
+                : t
+            ));
             await refreshStatus();
           } catch (e: any) {
             addLine('error', `echo: ${e.message}`);
@@ -322,14 +627,13 @@ export default function GitPlayground({ initialCommand }: { initialCommand?: str
       // ── GIT INIT ──────────────────────────────────────────
       if (cmd === 'git init') {
         try {
-          // ensure dir exists
           try { await f.mkdir(DIR); } catch { /* already exists */ }
           await g.init({ fs: { promises: f }, dir: DIR, defaultBranch: 'main' });
           addLines([
             { type: 'success', text: '✓ Initialized empty Git repository' },
             { type: 'output', text: `  Location: ${DIR}/.git/` },
             { type: 'info', text: '' },
-            { type: 'info', text: "💡 You're ready! Try: touch README.md" },
+            { type: 'info', text: '💡 Try: click "+ New File" in the panel to create files!' },
           ]);
           setState(prev => ({
             ...prev,
@@ -356,13 +660,13 @@ export default function GitPlayground({ initialCommand }: { initialCommand?: str
         try {
           const branch = await g.currentBranch({ fs: { promises: f }, dir: DIR }) || 'main';
           const statusMatrix = await g.statusMatrix({ fs: { promises: f }, dir: DIR });
-          
+
           const staged: string[] = [];
           const modified: string[] = [];
           const untracked: string[] = [];
 
           for (const [filepath, head, workdir, stage] of statusMatrix) {
-            if (head === 1 && workdir === 1 && stage === 1) continue; // unchanged
+            if (head === 1 && workdir === 1 && stage === 1) continue;
             if (stage === 2 || stage === 3) staged.push(filepath);
             else if (workdir === 2 && stage === 0) untracked.push(filepath);
             else if (workdir === 2) modified.push(filepath);
@@ -386,18 +690,18 @@ export default function GitPlayground({ initialCommand }: { initialCommand?: str
               outputLines.push({ type: 'success', text: '' });
               outputLines.push({ type: 'success', text: 'Changes to be committed:' });
               outputLines.push({ type: 'success', text: '  (use "git restore --staged <file>..." to unstage)' });
-              staged.forEach(f => outputLines.push({ type: 'success', text: `        modified:   ${f}` }));
+              staged.forEach(fi => outputLines.push({ type: 'success', text: `        modified:   ${fi}` }));
             }
             if (modified.length > 0) {
               outputLines.push({ type: 'error', text: '' });
               outputLines.push({ type: 'error', text: 'Changes not staged for commit:' });
-              modified.forEach(f => outputLines.push({ type: 'error', text: `        modified:   ${f}` }));
+              modified.forEach(fi => outputLines.push({ type: 'error', text: `        modified:   ${fi}` }));
             }
             if (untracked.length > 0) {
               outputLines.push({ type: 'output', text: '' });
               outputLines.push({ type: 'output', text: 'Untracked files:' });
               outputLines.push({ type: 'output', text: '  (use "git add <file>..." to include in commit)' });
-              untracked.forEach(f => outputLines.push({ type: 'output', text: `        ${f}` }));
+              untracked.forEach(fi => outputLines.push({ type: 'output', text: `        ${fi}` }));
             }
           }
 
@@ -433,6 +737,66 @@ export default function GitPlayground({ initialCommand }: { initialCommand?: str
           await refreshStatus();
         } catch (e: any) {
           addLine('error', `git add: ${e.message}`);
+        }
+        setLoading(false);
+        return;
+      }
+
+      // ── GIT RESTORE ───────────────────────────────────────
+      if (cmd.startsWith('git restore')) {
+        const parts = cmd.slice(12).trim().split(/\s+/);
+        const staged = parts.includes('--staged') || parts.includes('-S');
+        const file = parts.find(p => !p.startsWith('-'));
+        if (!file) {
+          addLine('error', 'Usage: git restore <file>  OR  git restore --staged <file>');
+          setLoading(false);
+          return;
+        }
+        try {
+          if (staged) {
+            await g.resetIndex({ fs: { promises: f }, dir: DIR, filepath: file });
+            addLine('success', `✓ Unstaged: ${file}`);
+          } else {
+            await g.checkout({ fs: { promises: f }, dir: DIR, filepaths: [file] });
+            addLine('success', `✓ Restored: ${file}`);
+            // Refresh tab
+            try {
+              const content = await f.readFile(`${DIR}/${file}`, { encoding: 'utf8' }) as string;
+              setTabs(prev => prev.map(t =>
+                t.filename === file ? { ...t, content, savedContent: content } : t
+              ));
+            } catch { /* ignore */ }
+          }
+          await refreshStatus();
+        } catch (e: any) {
+          addLine('error', `git restore: ${e.message}`);
+        }
+        setLoading(false);
+        return;
+      }
+
+      // ── GIT RM ────────────────────────────────────────────
+      if (cmd.startsWith('git rm')) {
+        const parts = cmd.slice(7).trim().split(/\s+/);
+        const cached = parts.includes('--cached');
+        const file = parts.find(p => !p.startsWith('-'));
+        if (!file) {
+          addLine('error', 'Usage: git rm <file>  OR  git rm --cached <file>');
+          setLoading(false);
+          return;
+        }
+        try {
+          await g.remove({ fs: { promises: f }, dir: DIR, filepath: file });
+          if (!cached) {
+            await f.unlink(`${DIR}/${file}`);
+            closeTab(file);
+            addLine('success', `✓ Removed ${file} from repo and disk`);
+          } else {
+            addLine('success', `✓ Untracked ${file} (file kept on disk)`);
+          }
+          await refreshStatus();
+        } catch (e: any) {
+          addLine('error', `git rm: ${e.message}`);
         }
         setLoading(false);
         return;
@@ -636,7 +1000,7 @@ export default function GitPlayground({ initialCommand }: { initialCommand?: str
         return;
       }
 
-      // ── GIT PUSH / PULL ───────────────────────────────────
+      // ── GIT PUSH / PULL / CLONE ───────────────────────────
       if (cmd.startsWith('git push') || cmd.startsWith('git pull') || cmd.startsWith('git clone')) {
         addLines([
           { type: 'info', text: '🌐 Network commands are simulated in this browser playground.' },
@@ -654,14 +1018,7 @@ export default function GitPlayground({ initialCommand }: { initialCommand?: str
     }
 
     setLoading(false);
-  }, [state, addLine, addLines, refreshStatus]);
-
-  // Handle initial command prop
-  useEffect(() => {
-    if (initialCommand && initialCommand.trim() && state.initialized) {
-      // Don't auto-run, just pre-fill
-    }
-  }, [initialCommand, state.initialized]);
+  }, [state, addLine, addLines, refreshStatus, closeTab]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
@@ -691,8 +1048,105 @@ export default function GitPlayground({ initialCommand }: { initialCommand?: str
     }
   };
 
+  // All files to display in the explorer
+  const allFiles = Array.from(new Set([
+    ...state.allDiskFiles,
+    ...Object.keys(state.files),
+    ...state.untracked,
+  ])).sort();
+
+  const getFileStatus = (filename: string): 'staged' | 'modified' | 'untracked' | 'clean' => {
+    if (state.staged.includes(filename)) return 'staged';
+    if (state.modified.includes(filename)) return 'modified';
+    if (state.untracked.includes(filename)) return 'untracked';
+    return 'clean';
+  };
+
+  const fileStatusColor = {
+    staged: 'var(--neon-green)',
+    modified: '#febc2e',
+    untracked: 'rgba(200,220,255,0.5)',
+    clean: 'var(--text-dim)',
+  };
+  const fileStatusLabel = { staged: 'S', modified: 'M', untracked: 'U', clean: '' };
+
+  // File extension for tokenizer
+  const activeExt = activeTab ? activeTab.split('.').pop()?.toLowerCase() ?? '' : '';
+
+  // ── Context menu actions ─────────────────────────────────────────────
+  const ctxActions = ctxMenu ? [
+    {
+      label: '📝 Open / Edit',
+      action: () => { openFile(ctxMenu.file); setCtxMenu(null); },
+    },
+    {
+      label: '✏️ Rename',
+      action: () => {
+        setRenamingFile(ctxMenu.file);
+        setRenameValue(ctxMenu.file);
+        setCtxMenu(null);
+      },
+    },
+    state.staged.includes(ctxMenu.file)
+      ? {
+          label: '↩ Unstage (git restore --staged)',
+          action: () => { executeCommand(`git restore --staged ${ctxMenu.file}`); setCtxMenu(null); },
+        }
+      : {
+          label: '➕ Stage (git add)',
+          action: () => { executeCommand(`git add ${ctxMenu.file}`); setCtxMenu(null); },
+        },
+    {
+      label: '🗑 Delete file',
+      action: () => { deleteFile(ctxMenu.file); setCtxMenu(null); },
+      danger: true,
+    },
+  ] : [];
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+      {/* Context menu */}
+      {ctxMenu && (
+        <div
+          style={{
+            position: 'fixed',
+            top: ctxMenu.y,
+            left: ctxMenu.x,
+            zIndex: 9999,
+            background: 'rgba(10,14,28,0.97)',
+            border: '1px solid rgba(0,245,255,0.25)',
+            borderRadius: '6px',
+            padding: '4px 0',
+            minWidth: '200px',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.7)',
+          }}
+          onClick={e => e.stopPropagation()}
+        >
+          {ctxActions.map((a, i) => (
+            <button
+              key={i}
+              onClick={a.action}
+              style={{
+                display: 'block',
+                width: '100%',
+                padding: '7px 14px',
+                background: 'transparent',
+                border: 'none',
+                textAlign: 'left',
+                cursor: 'pointer',
+                fontFamily: 'var(--font-mono)',
+                fontSize: '0.75rem',
+                color: (a as any).danger ? '#ff4466' : 'rgba(200,230,255,0.85)',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'rgba(0,245,255,0.07)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            >
+              {a.label}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Status Panel */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '10px' }}>
         {[
@@ -708,7 +1162,7 @@ export default function GitPlayground({ initialCommand }: { initialCommand?: str
         ))}
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: '16px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: editorExpanded ? '1fr' : '1fr 300px', gap: '16px' }}>
         {/* Terminal */}
         <div className="terminal" style={{ minHeight: '420px', display: 'flex', flexDirection: 'column' }}>
           <div className="terminal-header">
@@ -797,92 +1251,678 @@ export default function GitPlayground({ initialCommand }: { initialCommand?: str
           </div>
         </div>
 
-        {/* Right panel: Commit Graph + File Tree */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          {/* Commit Graph */}
-          <div className="glass-panel" style={{ padding: '14px', flex: 1 }}>
-            <div style={{ fontSize: '0.65rem', color: 'var(--neon-cyan)', fontFamily: 'var(--font-mono)', marginBottom: '10px', letterSpacing: '0.1em' }}>
-              📊 COMMIT GRAPH
-            </div>
-            {state.commits.length === 0 ? (
-              <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', fontFamily: 'var(--font-mono)', textAlign: 'center', padding: '20px 0' }}>
-                No commits yet.<br />Run git init & commit!
+        {/* ── RIGHT PANEL (file explorer + editor) ──────────── */}
+        {!editorExpanded && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+
+            {/* FILE EXPLORER */}
+            <div className="glass-panel" style={{ padding: '0', overflow: 'hidden', flex: tabs.length > 0 ? '0 0 auto' : '1' }}>
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '10px 12px',
+                borderBottom: '1px solid rgba(0,245,255,0.1)',
+              }}>
+                <span style={{ fontSize: '0.65rem', color: 'var(--neon-cyan)', fontFamily: 'var(--font-mono)', letterSpacing: '0.1em' }}>
+                  📁 FILES
+                </span>
+                {state.initialized && (
+                  <button
+                    onClick={() => { setShowNewFileForm(v => !v); setNewFileName(''); }}
+                    style={{
+                      background: showNewFileForm ? 'rgba(0,245,255,0.15)' : 'rgba(0,245,255,0.05)',
+                      border: '1px solid rgba(0,245,255,0.3)',
+                      color: 'var(--neon-cyan)',
+                      borderRadius: '4px',
+                      padding: '2px 8px',
+                      fontSize: '0.7rem',
+                      cursor: 'pointer',
+                      fontFamily: 'var(--font-mono)',
+                    }}
+                  >
+                    {showNewFileForm ? '✕ Cancel' : '+ New File'}
+                  </button>
+                )}
               </div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                {state.commits.slice(0, 8).map((commit, i) => (
-                  <div key={commit.hash} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    {/* Line */}
-                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: '16px', flexShrink: 0 }}>
+
+              {/* New file form */}
+              {showNewFileForm && (
+                <div style={{
+                  padding: '8px 12px',
+                  borderBottom: '1px solid rgba(0,245,255,0.1)',
+                  background: 'rgba(0,245,255,0.04)',
+                  display: 'flex', gap: '6px', alignItems: 'center',
+                }}>
+                  <input
+                    autoFocus
+                    value={newFileName}
+                    onChange={e => setNewFileName(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') createNewFile(newFileName);
+                      if (e.key === 'Escape') { setShowNewFileForm(false); setNewFileName(''); }
+                    }}
+                    placeholder="filename.ext"
+                    style={{
+                      flex: 1,
+                      background: 'rgba(0,0,0,0.4)',
+                      border: '1px solid rgba(0,245,255,0.3)',
+                      borderRadius: '4px',
+                      color: 'var(--neon-cyan)',
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: '0.75rem',
+                      padding: '4px 8px',
+                      outline: 'none',
+                    }}
+                  />
+                  <button
+                    onClick={() => createNewFile(newFileName)}
+                    style={{
+                      background: 'rgba(0,245,255,0.15)',
+                      border: '1px solid rgba(0,245,255,0.4)',
+                      color: 'var(--neon-cyan)',
+                      borderRadius: '4px',
+                      padding: '4px 10px',
+                      fontSize: '0.7rem',
+                      cursor: 'pointer',
+                      fontFamily: 'var(--font-mono)',
+                    }}
+                  >
+                    Create
+                  </button>
+                </div>
+              )}
+
+              {/* File list */}
+              <div style={{ maxHeight: tabs.length > 0 ? '130px' : '200px', overflowY: 'auto' }}>
+                {!state.initialized ? (
+                  <div style={{ padding: '16px 12px', color: 'var(--text-muted)', fontSize: '0.72rem', fontFamily: 'var(--font-mono)', textAlign: 'center' }}>
+                    Run git init to start
+                  </div>
+                ) : allFiles.length === 0 ? (
+                  <div style={{ padding: '16px 12px', color: 'var(--text-muted)', fontSize: '0.72rem', fontFamily: 'var(--font-mono)', textAlign: 'center' }}>
+                    No files yet.<br />Click + New File above.
+                  </div>
+                ) : (
+                  allFiles.map(filename => {
+                    const status = getFileStatus(filename);
+                    const isOpen = tabs.some(t => t.filename === filename);
+                    const isActive = activeTab === filename;
+                    const isRenaming = renamingFile === filename;
+
+                    return (
+                      <div
+                        key={filename}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: '6px',
+                          padding: '5px 12px',
+                          background: isActive ? 'rgba(0,245,255,0.08)' : isOpen ? 'rgba(0,245,255,0.03)' : 'transparent',
+                          borderLeft: isActive ? '2px solid var(--neon-cyan)' : isOpen ? '2px solid rgba(0,245,255,0.3)' : '2px solid transparent',
+                          cursor: 'pointer',
+                          transition: 'background 0.15s',
+                        }}
+                        onClick={() => !isRenaming && openFile(filename)}
+                        onDoubleClick={() => { setRenamingFile(filename); setRenameValue(filename); }}
+                        onContextMenu={e => { e.preventDefault(); setCtxMenu({ file: filename, x: e.clientX, y: e.clientY }); }}
+                        onMouseEnter={e => { if (!isActive) (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.04)'; }}
+                        onMouseLeave={e => { if (!isActive) (e.currentTarget as HTMLDivElement).style.background = isOpen ? 'rgba(0,245,255,0.03)' : 'transparent'; }}
+                      >
+                        <span style={{ fontSize: '0.72rem', flexShrink: 0 }}>📄</span>
+                        {isRenaming ? (
+                          <input
+                            ref={renameInputRef}
+                            value={renameValue}
+                            onChange={e => setRenameValue(e.target.value)}
+                            onClick={e => e.stopPropagation()}
+                            onKeyDown={e => {
+                              e.stopPropagation();
+                              if (e.key === 'Enter') commitRename(filename, renameValue);
+                              if (e.key === 'Escape') setRenamingFile(null);
+                            }}
+                            onBlur={() => commitRename(filename, renameValue)}
+                            style={{
+                              flex: 1,
+                              background: 'rgba(0,0,0,0.5)',
+                              border: '1px solid rgba(0,245,255,0.5)',
+                              borderRadius: '3px',
+                              color: 'var(--neon-cyan)',
+                              fontFamily: 'var(--font-mono)',
+                              fontSize: '0.72rem',
+                              padding: '1px 5px',
+                              outline: 'none',
+                            }}
+                          />
+                        ) : (
+                          <span style={{
+                            flex: 1,
+                            fontFamily: 'var(--font-mono)',
+                            fontSize: '0.74rem',
+                            color: isActive ? 'var(--neon-cyan)' : fileStatusColor[status],
+                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          }}
+                            title="Click to open • Double-click to rename • Right-click for more"
+                          >
+                            {filename}
+                          </span>
+                        )}
+                        {!isRenaming && fileStatusLabel[status] && (
+                          <span style={{
+                            fontSize: '0.6rem', fontFamily: 'var(--font-mono)',
+                            color: fileStatusColor[status], fontWeight: 700, opacity: 0.9, flexShrink: 0,
+                          }}>
+                            {fileStatusLabel[status]}
+                          </span>
+                        )}
+                        {!isRenaming && (
+                          <button
+                            title="Delete file"
+                            onClick={e => { e.stopPropagation(); deleteFile(filename); }}
+                            style={{
+                              background: 'transparent', border: 'none',
+                              color: 'rgba(255,68,102,0)', cursor: 'pointer',
+                              fontSize: '0.65rem', padding: '0 2px', flexShrink: 0,
+                              transition: 'color 0.15s',
+                            }}
+                            onMouseEnter={e => (e.currentTarget.style.color = '#ff4466')}
+                            onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,68,102,0)')}
+                          >
+                            🗑
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+
+              {/* Legend */}
+              {state.initialized && allFiles.length > 0 && (
+                <div style={{
+                  display: 'flex', gap: '10px', padding: '5px 12px',
+                  borderTop: '1px solid rgba(0,245,255,0.08)',
+                  fontSize: '0.58rem', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)',
+                }}>
+                  <span><span style={{ color: 'var(--neon-green)' }}>S</span> staged</span>
+                  <span><span style={{ color: '#febc2e' }}>M</span> modified</span>
+                  <span><span style={{ color: 'rgba(200,220,255,0.5)' }}>U</span> untracked</span>
+                  <span style={{ marginLeft: 'auto', opacity: 0.6 }}>dbl-click=rename</span>
+                </div>
+              )}
+            </div>
+
+            {/* ── MULTI-TAB FILE EDITOR ────────────────────── */}
+            {tabs.length > 0 && (
+              <div className="glass-panel" style={{ padding: '0', overflow: 'hidden', display: 'flex', flexDirection: 'column', flex: 1 }}>
+                {/* Tab bar */}
+                <div style={{
+                  display: 'flex',
+                  overflowX: 'auto',
+                  borderBottom: '1px solid rgba(191,0,255,0.2)',
+                  background: 'rgba(191,0,255,0.04)',
+                  scrollbarWidth: 'none',
+                }}>
+                  {tabs.map(tab => {
+                    const tabDirty = tab.content !== tab.savedContent;
+                    const isActive = activeTab === tab.filename;
+                    return (
+                      <div
+                        key={tab.filename}
+                        onClick={() => { setActiveTab(tab.filename); setTimeout(() => editorRef.current?.focus(), 30); }}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: '5px',
+                          padding: '6px 10px',
+                          cursor: 'pointer',
+                          borderRight: '1px solid rgba(191,0,255,0.15)',
+                          borderBottom: isActive ? '2px solid var(--neon-purple)' : '2px solid transparent',
+                          background: isActive ? 'rgba(191,0,255,0.1)' : 'transparent',
+                          whiteSpace: 'nowrap',
+                          flexShrink: 0,
+                          transition: 'background 0.12s',
+                        }}
+                      >
+                        <span style={{
+                          fontFamily: 'var(--font-mono)', fontSize: '0.68rem',
+                          color: isActive ? 'var(--neon-purple)' : 'var(--text-dim)',
+                          maxWidth: '100px', overflow: 'hidden', textOverflow: 'ellipsis',
+                        }}>
+                          {tab.filename}
+                        </span>
+                        {tabDirty && (
+                          <span style={{ color: '#febc2e', fontSize: '0.75rem', lineHeight: 1 }} title="Unsaved">●</span>
+                        )}
+                        <button
+                          title="Close tab"
+                          onClick={e => closeTab(tab.filename, e)}
+                          style={{
+                            background: 'transparent', border: 'none',
+                            color: 'rgba(200,230,255,0.3)',
+                            cursor: 'pointer', fontSize: '0.65rem', padding: '0 1px',
+                            lineHeight: 1,
+                          }}
+                          onMouseEnter={e => (e.currentTarget.style.color = '#ff4466')}
+                          onMouseLeave={e => (e.currentTarget.style.color = 'rgba(200,230,255,0.3)')}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    );
+                  })}
+                  {/* Expand button */}
+                  <button
+                    title="Expand editor to full width"
+                    onClick={() => setEditorExpanded(true)}
+                    style={{
+                      marginLeft: 'auto',
+                      background: 'transparent', border: 'none',
+                      color: 'rgba(0,245,255,0.4)',
+                      cursor: 'pointer', padding: '6px 10px',
+                      fontSize: '0.7rem', flexShrink: 0,
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.color = 'var(--neon-cyan)')}
+                    onMouseLeave={e => (e.currentTarget.style.color = 'rgba(0,245,255,0.4)')}
+                  >
+                    ⤢
+                  </button>
+                </div>
+
+                {/* Editor body */}
+                {activeTabData && (
+                  <>
+                    {/* Line-numbered editor */}
+                    <div style={{ flex: 1, display: 'flex', minHeight: '200px', overflow: 'hidden' }}>
+                      {/* Line numbers gutter */}
                       <div style={{
-                        width: '12px', height: '12px', borderRadius: '50%',
-                        border: `2px solid ${i === 0 ? 'var(--neon-cyan)' : 'var(--neon-purple)'}`,
-                        background: i === 0 ? 'rgba(0,245,255,0.2)' : 'rgba(191,0,255,0.1)',
-                        boxShadow: `0 0 8px ${i === 0 ? 'var(--neon-cyan)' : 'var(--neon-purple)'}`,
-                        flexShrink: 0,
-                      }} />
-                      {i < state.commits.length - 1 && (
-                        <div style={{ width: '2px', height: '16px', background: 'rgba(0,245,255,0.2)', marginTop: '2px' }} />
+                        background: 'rgba(0,0,0,0.25)',
+                        borderRight: '1px solid rgba(191,0,255,0.1)',
+                        padding: '10px 0',
+                        userSelect: 'none',
+                        minWidth: '36px',
+                        overflowY: 'hidden',
+                        textAlign: 'right',
+                      }}>
+                        {(activeTabData.content + '\n').split('\n').slice(0, -1).map((_, lineIdx) => (
+                          <div key={lineIdx} style={{
+                            height: '1.6em',
+                            lineHeight: '1.6em',
+                            paddingRight: '8px',
+                            fontFamily: 'var(--font-mono)',
+                            fontSize: '0.72rem',
+                            color: 'rgba(150,170,210,0.3)',
+                          }}>
+                            {lineIdx + 1}
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Tokenized overlay + hidden textarea trick */}
+                      <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
+                        {/* Syntax-highlighted backdrop (aria-hidden) */}
+                        <div
+                          aria-hidden="true"
+                          style={{
+                            position: 'absolute',
+                            top: 0, left: 0, right: 0, bottom: 0,
+                            padding: '10px 12px',
+                            fontFamily: 'var(--font-mono)',
+                            fontSize: '0.78rem',
+                            lineHeight: '1.6em',
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word',
+                            overflowY: 'auto',
+                            pointerEvents: 'none',
+                            color: 'transparent', // base invisible
+                          }}
+                        >
+                          {activeTabData.content.split('\n').map((line, li) => (
+                            <div key={li} style={{ height: '1.6em', overflow: 'hidden' }}>
+                              {tokenizeLine(line, activeExt).map((tok, ti) => (
+                                <span key={ti} style={{ color: tok.color }}>{tok.text}</span>
+                              ))}
+                              {'\n'}
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Actual textarea (transparent text, caret visible) */}
+                        <textarea
+                          ref={editorRef}
+                          value={activeTabData.content}
+                          onChange={e => {
+                            const val = e.target.value;
+                            setTabs(prev => prev.map(t =>
+                              t.filename === activeTab ? { ...t, content: val } : t
+                            ));
+                          }}
+                          onKeyDown={e => {
+                            if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+                              e.preventDefault();
+                              saveActiveTab();
+                            }
+                            if (e.key === 'Tab') {
+                              e.preventDefault();
+                              const start = e.currentTarget.selectionStart;
+                              const end = e.currentTarget.selectionEnd;
+                              const val = activeTabData.content;
+                              const newVal = val.substring(0, start) + '  ' + val.substring(end);
+                              setTabs(prev => prev.map(t =>
+                                t.filename === activeTab ? { ...t, content: newVal } : t
+                              ));
+                              setTimeout(() => {
+                                if (editorRef.current) {
+                                  editorRef.current.selectionStart = start + 2;
+                                  editorRef.current.selectionEnd = start + 2;
+                                }
+                              }, 0);
+                            }
+                          }}
+                          placeholder={`// ${activeTabData.filename}\n// Start typing...`}
+                          spellCheck={false}
+                          style={{
+                            position: 'absolute',
+                            top: 0, left: 0, right: 0, bottom: 0,
+                            width: '100%', height: '100%',
+                            resize: 'none',
+                            background: 'rgba(0,0,0,0.3)',
+                            border: 'none',
+                            color: 'rgba(200,230,255,0.88)',
+                            caretColor: 'var(--neon-cyan)',
+                            fontFamily: 'var(--font-mono)',
+                            fontSize: '0.78rem',
+                            lineHeight: '1.6em',
+                            padding: '10px 12px',
+                            outline: 'none',
+                            overflowY: 'auto',
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Footer bar */}
+                    <div style={{
+                      display: 'flex', alignItems: 'center', gap: '10px',
+                      padding: '4px 10px',
+                      borderTop: '1px solid rgba(191,0,255,0.12)',
+                      background: 'rgba(0,0,0,0.2)',
+                      fontSize: '0.6rem', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)',
+                    }}>
+                      <span style={{ color: activeExt ? 'rgba(0,245,255,0.45)' : 'var(--text-muted)' }}>
+                        {activeExt ? activeExt.toUpperCase() : 'TXT'}
+                      </span>
+                      <span>
+                        {(activeTabData.content.split('\n').length)} lines
+                      </span>
+                      <span>Ctrl+S save</span>
+                      <span>Tab=2sp</span>
+                      {isDirty && (
+                        <button
+                          onClick={saveActiveTab}
+                          style={{
+                            marginLeft: 'auto',
+                            background: 'rgba(0,245,255,0.1)',
+                            border: '1px solid rgba(0,245,255,0.35)',
+                            color: 'var(--neon-cyan)',
+                            borderRadius: '3px',
+                            padding: '1px 8px',
+                            fontSize: '0.6rem',
+                            cursor: 'pointer',
+                            fontFamily: 'var(--font-mono)',
+                          }}
+                        >
+                          ✓ Save
+                        </button>
                       )}
                     </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.65rem', color: 'var(--neon-cyan)', marginBottom: '1px' }}>
-                        {commit.shortHash} {i === 0 ? '← HEAD' : ''}
-                      </div>
-                      <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {commit.message}
-                      </div>
-                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* Commit Graph (when no tabs open) */}
+            {tabs.length === 0 && (
+              <div className="glass-panel" style={{ padding: '14px', flex: 1 }}>
+                <div style={{ fontSize: '0.65rem', color: 'var(--neon-cyan)', fontFamily: 'var(--font-mono)', marginBottom: '10px', letterSpacing: '0.1em' }}>
+                  📊 COMMIT GRAPH
+                </div>
+                {state.commits.length === 0 ? (
+                  <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', fontFamily: 'var(--font-mono)', textAlign: 'center', padding: '20px 0' }}>
+                    No commits yet.<br />Run git init & commit!
                   </div>
-                ))}
-                {state.commits.length > 8 && (
-                  <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textAlign: 'center', padding: '4px 0', fontFamily: 'var(--font-mono)' }}>
-                    +{state.commits.length - 8} more commits
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    {state.commits.slice(0, 8).map((commit, i) => (
+                      <div key={commit.hash} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: '16px', flexShrink: 0 }}>
+                          <div style={{
+                            width: '12px', height: '12px', borderRadius: '50%',
+                            border: `2px solid ${i === 0 ? 'var(--neon-cyan)' : 'var(--neon-purple)'}`,
+                            background: i === 0 ? 'rgba(0,245,255,0.2)' : 'rgba(191,0,255,0.1)',
+                            boxShadow: `0 0 8px ${i === 0 ? 'var(--neon-cyan)' : 'var(--neon-purple)'}`,
+                            flexShrink: 0,
+                          }} />
+                          {i < state.commits.length - 1 && (
+                            <div style={{ width: '2px', height: '16px', background: 'rgba(0,245,255,0.2)', marginTop: '2px' }} />
+                          )}
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.65rem', color: 'var(--neon-cyan)', marginBottom: '1px' }}>
+                            {commit.shortHash} {i === 0 ? '← HEAD' : ''}
+                          </div>
+                          <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {commit.message}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                    {state.commits.length > 8 && (
+                      <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textAlign: 'center', padding: '4px 0', fontFamily: 'var(--font-mono)' }}>
+                        +{state.commits.length - 8} more commits
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
             )}
+
+            {/* Branches panel */}
+            {state.branches.length > 0 && (
+              <div className="glass-panel" style={{ padding: '12px' }}>
+                <div style={{ fontSize: '0.65rem', color: 'var(--neon-green)', fontFamily: 'var(--font-mono)', marginBottom: '8px', letterSpacing: '0.1em' }}>
+                  🌿 BRANCHES
+                </div>
+                {state.branches.map(b => (
+                  <div key={b} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '3px 0' }}>
+                    <div style={{
+                      width: '8px', height: '8px', borderRadius: '50%',
+                      background: b === state.currentBranch ? 'var(--neon-green)' : 'var(--text-muted)',
+                      boxShadow: b === state.currentBranch ? '0 0 6px var(--neon-green)' : 'none',
+                    }} />
+                    <span style={{
+                      fontFamily: 'var(--font-mono)', fontSize: '0.75rem',
+                      color: b === state.currentBranch ? 'var(--neon-green)' : 'var(--text-dim)',
+                    }}>
+                      {b === state.currentBranch ? '* ' : '  '}{b}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
+        )}
 
-          {/* Branches */}
-          {state.branches.length > 0 && (
-            <div className="glass-panel" style={{ padding: '12px' }}>
-              <div style={{ fontSize: '0.65rem', color: 'var(--neon-green)', fontFamily: 'var(--font-mono)', marginBottom: '8px', letterSpacing: '0.1em' }}>
-                🌿 BRANCHES
-              </div>
-              {state.branches.map(b => (
-                <div key={b} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '3px 0' }}>
+        {/* ── EXPANDED EDITOR (full-width mode) ──────────────── */}
+        {editorExpanded && tabs.length > 0 && (
+          <div className="glass-panel" style={{ padding: '0', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+            {/* Tab bar */}
+            <div style={{
+              display: 'flex', overflowX: 'auto',
+              borderBottom: '1px solid rgba(191,0,255,0.2)',
+              background: 'rgba(191,0,255,0.04)',
+              scrollbarWidth: 'none',
+            }}>
+              {tabs.map(tab => {
+                const tabDirty = tab.content !== tab.savedContent;
+                const isActive = activeTab === tab.filename;
+                return (
+                  <div
+                    key={tab.filename}
+                    onClick={() => { setActiveTab(tab.filename); setTimeout(() => editorRef.current?.focus(), 30); }}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: '5px',
+                      padding: '7px 12px',
+                      cursor: 'pointer',
+                      borderRight: '1px solid rgba(191,0,255,0.15)',
+                      borderBottom: isActive ? '2px solid var(--neon-purple)' : '2px solid transparent',
+                      background: isActive ? 'rgba(191,0,255,0.12)' : 'transparent',
+                      whiteSpace: 'nowrap', flexShrink: 0,
+                    }}
+                  >
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.78rem', color: isActive ? 'var(--neon-purple)' : 'var(--text-dim)' }}>
+                      {tab.filename}
+                    </span>
+                    {tabDirty && <span style={{ color: '#febc2e', fontSize: '0.8rem' }}>●</span>}
+                    <button
+                      onClick={e => closeTab(tab.filename, e)}
+                      style={{ background: 'transparent', border: 'none', color: 'rgba(200,230,255,0.3)', cursor: 'pointer', fontSize: '0.7rem', padding: '0 2px' }}
+                      onMouseEnter={e => (e.currentTarget.style.color = '#ff4466')}
+                      onMouseLeave={e => (e.currentTarget.style.color = 'rgba(200,230,255,0.3)')}
+                    >✕</button>
+                  </div>
+                );
+              })}
+              {/* Collapse button */}
+              <button
+                title="Collapse editor"
+                onClick={() => setEditorExpanded(false)}
+                style={{
+                  marginLeft: 'auto',
+                  background: 'transparent', border: 'none',
+                  color: 'rgba(0,245,255,0.4)',
+                  cursor: 'pointer', padding: '7px 12px',
+                  fontSize: '0.75rem', flexShrink: 0,
+                }}
+                onMouseEnter={e => (e.currentTarget.style.color = 'var(--neon-cyan)')}
+                onMouseLeave={e => (e.currentTarget.style.color = 'rgba(0,245,255,0.4)')}
+              >
+                ⤡ Collapse
+              </button>
+            </div>
+
+            {activeTabData && (
+              <>
+                <div style={{ flex: 1, display: 'flex', minHeight: '300px', overflow: 'hidden' }}>
+                  {/* Gutter */}
                   <div style={{
-                    width: '8px', height: '8px', borderRadius: '50%',
-                    background: b === state.currentBranch ? 'var(--neon-green)' : 'var(--text-muted)',
-                    boxShadow: b === state.currentBranch ? '0 0 6px var(--neon-green)' : 'none',
-                  }} />
-                  <span style={{
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: '0.75rem',
-                    color: b === state.currentBranch ? 'var(--neon-green)' : 'var(--text-dim)',
+                    background: 'rgba(0,0,0,0.25)',
+                    borderRight: '1px solid rgba(191,0,255,0.1)',
+                    padding: '10px 0',
+                    userSelect: 'none',
+                    minWidth: '42px',
+                    textAlign: 'right',
                   }}>
-                    {b === state.currentBranch ? '* ' : '  '}{b}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
+                    {(activeTabData.content + '\n').split('\n').slice(0, -1).map((_, lineIdx) => (
+                      <div key={lineIdx} style={{
+                        height: '1.6em', lineHeight: '1.6em', paddingRight: '10px',
+                        fontFamily: 'var(--font-mono)', fontSize: '0.78rem',
+                        color: 'rgba(150,170,210,0.3)',
+                      }}>
+                        {lineIdx + 1}
+                      </div>
+                    ))}
+                  </div>
 
-          {/* Files */}
-          {Object.keys(state.files).length > 0 && (
-            <div className="glass-panel" style={{ padding: '12px' }}>
-              <div style={{ fontSize: '0.65rem', color: 'var(--neon-purple)', fontFamily: 'var(--font-mono)', marginBottom: '8px', letterSpacing: '0.1em' }}>
-                📁 TRACKED FILES
-              </div>
-              {Object.keys(state.files).slice(0, 8).map(f => (
-                <div key={f} style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', padding: '2px 0' }}>
-                  📄 {f}
+                  {/* Code area */}
+                  <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
+                    <div
+                      aria-hidden="true"
+                      style={{
+                        position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+                        padding: '10px 14px',
+                        fontFamily: 'var(--font-mono)', fontSize: '0.82rem', lineHeight: '1.6em',
+                        whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                        overflowY: 'auto', pointerEvents: 'none', color: 'transparent',
+                      }}
+                    >
+                      {activeTabData.content.split('\n').map((line, li) => (
+                        <div key={li} style={{ height: '1.6em', overflow: 'hidden' }}>
+                          {tokenizeLine(line, activeExt).map((tok, ti) => (
+                            <span key={ti} style={{ color: tok.color }}>{tok.text}</span>
+                          ))}
+                          {'\n'}
+                        </div>
+                      ))}
+                    </div>
+                    <textarea
+                      ref={editorRef}
+                      value={activeTabData.content}
+                      onChange={e => {
+                        const val = e.target.value;
+                        setTabs(prev => prev.map(t =>
+                          t.filename === activeTab ? { ...t, content: val } : t
+                        ));
+                      }}
+                      onKeyDown={e => {
+                        if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveActiveTab(); }
+                        if (e.key === 'Tab') {
+                          e.preventDefault();
+                          const start = e.currentTarget.selectionStart;
+                          const end = e.currentTarget.selectionEnd;
+                          const val = activeTabData.content;
+                          const newVal = val.substring(0, start) + '  ' + val.substring(end);
+                          setTabs(prev => prev.map(t =>
+                            t.filename === activeTab ? { ...t, content: newVal } : t
+                          ));
+                          setTimeout(() => {
+                            if (editorRef.current) {
+                              editorRef.current.selectionStart = start + 2;
+                              editorRef.current.selectionEnd = start + 2;
+                            }
+                          }, 0);
+                        }
+                      }}
+                      spellCheck={false}
+                      style={{
+                        position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+                        width: '100%', height: '100%',
+                        resize: 'none', background: 'rgba(0,0,0,0.3)', border: 'none',
+                        color: 'rgba(200,230,255,0.88)', caretColor: 'var(--neon-cyan)',
+                        fontFamily: 'var(--font-mono)', fontSize: '0.82rem', lineHeight: '1.6em',
+                        padding: '10px 14px', outline: 'none', overflowY: 'auto',
+                      }}
+                    />
+                  </div>
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
+
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: '12px',
+                  padding: '5px 12px',
+                  borderTop: '1px solid rgba(191,0,255,0.12)',
+                  background: 'rgba(0,0,0,0.2)',
+                  fontSize: '0.65rem', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)',
+                }}>
+                  <span style={{ color: activeExt ? 'rgba(0,245,255,0.5)' : 'var(--text-muted)' }}>
+                    {activeExt ? activeExt.toUpperCase() : 'TXT'}
+                  </span>
+                  <span>{activeTabData.content.split('\n').length} lines</span>
+                  <span>Ctrl+S save</span>
+                  <span>Tab=2sp</span>
+                  {isDirty && (
+                    <button
+                      onClick={saveActiveTab}
+                      style={{
+                        marginLeft: 'auto',
+                        background: 'rgba(0,245,255,0.1)',
+                        border: '1px solid rgba(0,245,255,0.35)',
+                        color: 'var(--neon-cyan)',
+                        borderRadius: '3px', padding: '2px 10px',
+                        fontSize: '0.65rem', cursor: 'pointer', fontFamily: 'var(--font-mono)',
+                      }}
+                    >
+                      ✓ Save
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

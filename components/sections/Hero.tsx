@@ -2,9 +2,10 @@
 
 interface HeroProps {
   onStart: () => void;
+  onPlayground: () => void;
 }
 
-export default function Hero({ onStart }: HeroProps) {
+export default function Hero({ onStart, onPlayground }: HeroProps) {
   return (
     <div style={{ maxWidth: '900px', margin: '0 auto', padding: '20px 0 40px' }}>
       {/* Main Hero */}
@@ -59,7 +60,7 @@ export default function Hero({ onStart }: HeroProps) {
             ⚡ Start Learning Now
           </button>
           <button
-            onClick={() => document.getElementById('playground-section')?.scrollIntoView({ behavior: 'smooth' })}
+            onClick={onPlayground}
             className="btn-neon-purple"
             style={{ padding: '14px 32px', borderRadius: '14px', fontSize: '1rem' }}
           >

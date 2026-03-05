@@ -83,7 +83,7 @@ export default function Home() {
   const renderContent = () => {
     switch (activeSection) {
       case 'hero':
-        return <Hero onStart={() => handleNavigate('history')} />;
+        return <Hero onStart={() => handleNavigate('history')} onPlayground={() => handleNavigate('playground')} />;
 
       case 'history':
         return (
