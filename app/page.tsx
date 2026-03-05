@@ -186,7 +186,7 @@ export default function Home() {
               <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                 <span style={{ fontSize: '2rem' }}>🎯</span>
                 <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 'clamp(1.2rem, 3vw, 1.6rem)', color: 'var(--neon-cyan)', letterSpacing: '0.05em' }}>
-                  Final Quiz — 20 Questions
+                  Final Quiz — 40 Questions
                 </h1>
               </div>
             </div>

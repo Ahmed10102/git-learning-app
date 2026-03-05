@@ -491,6 +491,166 @@ export const QUIZ_QUESTIONS: QuizQuestion[] = [
     correctIndex: 2,
     explanation: 'Good commit messages are specific and describe WHAT and WHY. "fix" tells you nothing. The detailed message tells you exactly what was fixed and even references a ticket number. Future-you will thank present-you!',
     category: 'Best Practices'
+  },
+  {
+    id: 21,
+    question: 'What command shows a compact, one-line-per-commit version of the log?',
+    options: ['git log --compact', 'git log --short', 'git log --oneline', 'git log --brief'],
+    correctIndex: 2,
+    explanation: 'git log --oneline prints each commit as a single line: short hash + message. It\'s perfect for quickly scanning project history without the full author/date details.',
+    category: 'Commands'
+  },
+  {
+    id: 22,
+    question: 'Which file tells Git to never track certain files or folders?',
+    options: ['.gitconfig', '.gitkeep', '.gitignore', '.gitskip'],
+    correctIndex: 2,
+    explanation: '.gitignore is a plain text file at the root of your project. Each line is a pattern; any matching file or folder is completely ignored by Git — never staged, never committed.',
+    category: 'Concepts'
+  },
+  {
+    id: 23,
+    question: 'What does "git merge" do?',
+    options: ['Deletes a branch after use', 'Combines changes from one branch into your current branch', 'Uploads your branch to GitHub', 'Shows differences between branches'],
+    correctIndex: 1,
+    explanation: 'git merge integrates the commit history of the specified branch into your currently checked-out branch. If both branches changed the same lines you\'ll get a merge conflict to resolve manually.',
+    category: 'Commands'
+  },
+  {
+    id: 24,
+    question: 'How was version control handled before Git was created?',
+    options: ['There was no version control at all', 'Developers emailed zip files of source code to each other', 'Teams used centralised systems like CVS and Subversion (SVN)', 'Code was stored in a shared spreadsheet'],
+    correctIndex: 2,
+    explanation: 'Before Git, centralised VCS tools like CVS and Subversion (SVN) were common. They stored history on a central server — if it went down, nobody could commit. Git\'s distributed model was a revolution.',
+    category: 'History'
+  },
+  {
+    id: 25,
+    question: 'What is a "fork" on GitHub?',
+    options: ['A way to delete someone else\'s repository', 'Your personal copy of another user\'s repository on GitHub', 'A special type of branch inside a repo', 'A GitHub feature for resolving merge conflicts'],
+    correctIndex: 1,
+    explanation: 'Forking creates your own copy of someone else\'s repository under your GitHub account. You can freely experiment, and later open a Pull Request back to the original. It\'s the foundation of open-source contribution.',
+    category: 'GitHub'
+  },
+  {
+    id: 26,
+    question: 'What does "git stash" do?',
+    options: ['Permanently deletes uncommitted changes', 'Temporarily shelves (stashes) changes so you can work on something else', 'Pushes changes to a remote stash branch', 'Archives old commits to free up space'],
+    correctIndex: 1,
+    explanation: 'git stash saves your uncommitted changes to a temporary stack and reverts the working directory to the last commit. Use git stash pop to bring them back. Great for quickly switching branches without committing half-done work.',
+    category: 'Commands'
+  },
+  {
+    id: 27,
+    question: 'What is "HEAD" in Git?',
+    options: ['The first commit ever made in a repository', 'A pointer to the commit you are currently working on', 'The name of the main branch', 'The most recently pushed commit on GitHub'],
+    correctIndex: 1,
+    explanation: 'HEAD is Git\'s pointer to your current location — usually the tip of the branch you have checked out. When you commit, HEAD moves forward. Detached HEAD means HEAD points directly to a commit instead of a branch.',
+    category: 'Concepts'
+  },
+  {
+    id: 28,
+    question: 'Which command un-stages a file without discarding its changes?',
+    options: ['git reset HEAD <file>', 'git delete --staged <file>', 'git remove <file>', 'git undo <file>'],
+    correctIndex: 0,
+    explanation: 'git reset HEAD <file> (or the modern git restore --staged <file>) removes the file from the staging area while keeping your working-directory changes intact. Nothing is lost; the file just goes back to "modified but not staged."',
+    category: 'Commands'
+  },
+  {
+    id: 29,
+    question: 'What is a "detached HEAD" state?',
+    options: ['A corrupted Git repository', 'When HEAD points directly to a commit instead of a branch name', 'A branch with no commits', 'When the remote and local branches are out of sync'],
+    correctIndex: 1,
+    explanation: 'Detached HEAD means you\'ve checked out a specific commit (not a branch). Any new commits you make won\'t belong to any branch and could be lost. To save work, create a branch: git switch -c my-branch.',
+    category: 'Concepts'
+  },
+  {
+    id: 30,
+    question: 'What does "git fetch" do compared to "git pull"?',
+    options: ['They are identical commands', 'git fetch downloads changes but does NOT merge them; git pull downloads AND merges', 'git fetch is faster because it skips authentication', 'git pull only works on the main branch'],
+    correctIndex: 1,
+    explanation: 'git fetch downloads commits, branches, and tags from the remote into your local repo but leaves your working directory untouched. git pull = git fetch + git merge. Using fetch first lets you inspect changes before merging.',
+    category: 'Commands'
+  },
+  {
+    id: 31,
+    question: 'What does the -u flag do in "git push -u origin main"?',
+    options: ['Forces the push even if there are conflicts', 'Sets the upstream so future plain "git push" works automatically', 'Updates the remote URL', 'Uploads all branches at once'],
+    correctIndex: 1,
+    explanation: 'The -u flag (short for --set-upstream) links your local branch to the remote branch. After running it once, you can just type git push or git pull without specifying remote and branch every time.',
+    category: 'Commands'
+  },
+  {
+    id: 32,
+    question: 'What is a "bare" Git repository?',
+    options: ['A repository with no commits yet', 'A repository that stores only Git history with no working directory', 'A repository missing a .gitignore file', 'A private GitHub repository'],
+    correctIndex: 1,
+    explanation: 'A bare repository contains only the Git data (like the .git folder contents) and no working files. Servers like GitHub store bare repos. You can\'t edit files directly in a bare repo — it\'s only for sharing history.',
+    category: 'Concepts'
+  },
+  {
+    id: 33,
+    question: 'What command would you use to see the differences between your working directory and the last commit?',
+    options: ['git status', 'git show', 'git diff', 'git compare'],
+    correctIndex: 2,
+    explanation: 'git diff shows the exact line-by-line changes between your working directory and the staging area (or between commits). git diff --staged shows staged changes. It\'s the detailed view; git status only shows which files changed.',
+    category: 'Commands'
+  },
+  {
+    id: 34,
+    question: 'Which of these is a good reason to use branches?',
+    options: ['To make the repository smaller', 'To work on a new feature without breaking the main codebase', 'To speed up git push', 'To encrypt your commits'],
+    correctIndex: 1,
+    explanation: 'Branches let you isolate work. You build a feature, test it, and only merge it to main when it\'s ready. If something goes wrong, main is unaffected. This is the cornerstone of every professional Git workflow.',
+    category: 'Best Practices'
+  },
+  {
+    id: 35,
+    question: 'What does "git revert <commit>" do?',
+    options: ['Permanently deletes the specified commit from history', 'Creates a NEW commit that undoes the changes of the specified commit', 'Moves HEAD back to the specified commit', 'Reverts all uncommitted changes'],
+    correctIndex: 1,
+    explanation: 'git revert is the safe way to undo a published commit. It creates a brand new commit that applies the inverse of the target commit\'s changes — history stays intact, making it safe to use on shared branches.',
+    category: 'Commands'
+  },
+  {
+    id: 36,
+    question: 'What is a GitHub Action?',
+    options: ['A keyboard shortcut in the GitHub web UI', 'An automated workflow that runs on events like push or pull request', 'A way to delete merged branches automatically', 'A Git command exclusive to GitHub'],
+    correctIndex: 1,
+    explanation: 'GitHub Actions is a CI/CD platform built into GitHub. You define workflows in YAML files inside .github/workflows/. They trigger on events (push, PR, schedule) and can run tests, build apps, or deploy automatically.',
+    category: 'GitHub'
+  },
+  {
+    id: 37,
+    question: 'When was the first public version of GitHub launched?',
+    options: ['2005', '2007', '2008', '2010'],
+    correctIndex: 2,
+    explanation: 'GitHub was launched in April 2008 by Tom Preston-Werner, Chris Wanstrath, PJ Hyett, and Scott Chacon. It quickly became the world\'s largest host for open-source projects and was acquired by Microsoft in 2018.',
+    category: 'History'
+  },
+  {
+    id: 38,
+    question: 'What does "git cherry-pick <commit>" do?',
+    options: ['Randomly selects a commit to revert', 'Applies the changes from a specific commit onto your current branch', 'Merges only the files that conflict', 'Exports a commit as a patch file'],
+    correctIndex: 1,
+    explanation: 'git cherry-pick lets you apply a single commit from any branch to your current branch without merging the whole branch. It\'s handy for backporting a bug fix from main to a release branch.',
+    category: 'Commands'
+  },
+  {
+    id: 39,
+    question: 'What is the purpose of a code review on a Pull Request?',
+    options: ['To automatically merge code without manual testing', 'To let teammates inspect, discuss, and approve changes before they are merged', 'To delete the feature branch after merging', 'To run performance benchmarks on the new code'],
+    correctIndex: 1,
+    explanation: 'Code review on a PR is a collaborative quality gate. Reviewers can leave inline comments, request changes, or approve. It catches bugs early, spreads knowledge across the team, and keeps code quality high.',
+    category: 'Best Practices'
+  },
+  {
+    id: 40,
+    question: 'Which Git hosting platform was acquired by Microsoft in 2018?',
+    options: ['GitLab', 'Bitbucket', 'GitHub', 'SourceForge'],
+    correctIndex: 2,
+    explanation: 'Microsoft acquired GitHub in June 2018 for $7.5 billion. Despite initial community concerns, GitHub has remained widely used and Microsoft has continued to invest heavily in its development, including launching GitHub Copilot.',
+    category: 'History'
   }
 ];
 

@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { QUIZ_QUESTIONS } from '@/lib/data';
 import type { QuizResult } from '@/lib/types';
-import { getSupabaseClient, getSessionId } from '@/lib/supabase';
+import { getSessionId } from '@/lib/supabase';
 
 interface QuizProps {
   onComplete: (result: QuizResult) => void;
@@ -27,7 +27,7 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
   const [currentQ, setCurrentQ] = useState(0);
   const [selectedAnswers, setSelectedAnswers] = useState<number[]>([]);
   const [answered, setAnswered] = useState(false);
-  const [timeLeft, setTimeLeft] = useState(20 * 60);
+  const [timeLeft, setTimeLeft] = useState(40 * 60);
   const [startTime, setStartTime] = useState(0);
   const [result, setResult] = useState<QuizResult | null>(existingResult || null);
   // questionOrder holds the shuffled indices into QUIZ_QUESTIONS
@@ -55,36 +55,26 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
 
     if (intervalRef.current) clearInterval(intervalRef.current);
 
-    // Save to Supabase FIRST — before onComplete navigates the page away
+    // Save to Supabase via server-side API route (avoids client unmount / env var issues)
     try {
-      const client = getSupabaseClient();
-      if (client) {
-        const sessionId = getSessionId();
-        // Use fetch directly with keepalive so the request survives component unmount
-        const url = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1/quiz_results`;
-        const payload = {
-          student_name: quizName,
-          session_id: sessionId,
-          score,
-          total: QUIZ_QUESTIONS.length,
-          time_taken: timeTaken,
-          answers,
-          question_order: order,
-        };
-        fetch(url, {
-          method: 'POST',
-          keepalive: true,
-          headers: {
-            'Content-Type': 'application/json',
-            'apikey': process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-            'Authorization': `Bearer ${process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY}`,
-            'Prefer': 'return=minimal',
-          },
-          body: JSON.stringify(payload),
-        }).catch(e => console.warn('Supabase quiz save failed:', e));
-      }
+      const sessionId = getSessionId();
+      const payload = {
+        student_name: quizName,
+        session_id: sessionId,
+        score,
+        total: QUIZ_QUESTIONS.length,
+        time_taken: timeTaken,
+        answers,
+        question_order: order,
+      };
+      fetch('/api/save-result', {
+        method: 'POST',
+        keepalive: true,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }).catch(e => console.warn('Quiz save failed:', e));
     } catch (e) {
-      console.warn('Supabase quiz save failed (offline?):', e);
+      console.warn('Quiz save failed:', e);
     }
 
     setResult(quizResult);
@@ -119,7 +109,7 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
     setCurrentQ(0);
     setSelectedAnswers([]);
     setAnswered(false);
-    setTimeLeft(20 * 60);
+    setTimeLeft(40 * 60);
     setStartTime(Date.now());
   };
 
@@ -211,7 +201,7 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
               className="btn-neon-green"
               style={{ padding: '10px 24px', borderRadius: '12px' }}
             >
-              🏆 Download Certificate
+              🏆 Download Report & Certificate
             </button>
           </div>
         </div>
@@ -268,10 +258,10 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
             FINAL QUIZ
           </h2>
           <p style={{ color: 'var(--text-dim)', marginBottom: '8px', lineHeight: 1.6 }}>
-            20 multiple-choice questions — randomised every attempt.
+            40 multiple-choice questions — randomised every attempt.
           </p>
           <div style={{ display: 'flex', justifyContent: 'center', gap: '20px', margin: '16px 0', flexWrap: 'wrap' }}>
-            {[{ icon: '⏱️', text: '20 min limit' }, { icon: '🔀', text: 'Random order' }, { icon: '🏆', text: 'Get a certificate' }].map(item => (
+            {[{ icon: '⏱️', text: '40 min limit' }, { icon: '🔀', text: 'Random order' }, { icon: '🏆', text: 'Get a certificate' }].map(item => (
               <div key={item.text} style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-dim)', fontSize: '0.85rem' }}>
                 <span>{item.icon}</span><span>{item.text}</span>
               </div>
@@ -382,7 +372,7 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
   );
 }
 
-// ── CERTIFICATE ─────────────────────────────────────────────────────────────
+// ── CERTIFICATE + REPORT ────────────────────────────────────────────────────
 async function generateCertificate(result: QuizResult) {
   try {
     const { default: jsPDF } = await import('jspdf');
@@ -391,9 +381,207 @@ async function generateCertificate(result: QuizResult) {
     const h = doc.internal.pageSize.getHeight();
     const cx = w / 2;
 
-    // ── Background ──
-    doc.setFillColor(2, 4, 16);
-    doc.rect(0, 0, w, h, 'F');
+    const pct = Math.round((result.score / result.total) * 100);
+    const grade = pct >= 90 ? 'S' : pct >= 80 ? 'A' : pct >= 70 ? 'B' : pct >= 60 ? 'C' : 'F';
+    const mins = Math.floor(result.timeTaken / 60);
+    const secs = result.timeTaken % 60;
+    const dateStr = new Date(result.completedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+
+    // ── Helper: dark page background ──────────────────────────────────────────
+    const darkBg = () => {
+      doc.setFillColor(2, 4, 16);
+      doc.rect(0, 0, w, h, 'F');
+    };
+
+    // ── Helper: draw subtle grid overlay ─────────────────────────────────────
+    const drawGrid = () => {
+      doc.setDrawColor(0, 40, 55);
+      doc.setLineWidth(0.1);
+      for (let x = 0; x <= w; x += 10) doc.line(x, 0, x, h);
+      for (let y = 0; y <= h; y += 10) doc.line(0, y, w, y);
+    };
+
+    // ── Helper: truncate text to fit ─────────────────────────────────────────
+    const truncate = (text: string, maxLen: number) =>
+      text.length > maxLen ? text.slice(0, maxLen - 1) + '…' : text;
+
+    // ════════════════════════════════════════════════════════════════════════
+    // PAGE 1 — REPORT SUMMARY + QUESTION BREAKDOWN
+    // ════════════════════════════════════════════════════════════════════════
+    darkBg();
+    drawGrid();
+
+    // Outer border
+    doc.setDrawColor(0, 200, 220);
+    doc.setLineWidth(1.5);
+    doc.roundedRect(5, 5, w - 10, h - 10, 3, 3, 'S');
+    doc.setDrawColor(191, 0, 255);
+    doc.setLineWidth(0.4);
+    doc.roundedRect(8, 8, w - 16, h - 16, 2, 2, 'S');
+
+    // Title bar
+    doc.setFillColor(0, 20, 35);
+    doc.rect(8, 8, w - 16, 16, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(0, 245, 255);
+    doc.text('GIT CYBER ACADEMY  —  QUIZ REPORT', cx, 18, { align: 'center' });
+
+    // Summary row
+    const sy = 32;
+    const summaryItems = [
+      { label: 'STUDENT', value: result.name },
+      { label: 'SCORE', value: `${result.score} / ${result.total}` },
+      { label: 'PERCENTAGE', value: `${pct}%` },
+      { label: 'GRADE', value: grade },
+      { label: 'TIME', value: `${mins}m ${secs}s` },
+      { label: 'DATE', value: dateStr },
+    ];
+    const colW = (w - 20) / summaryItems.length;
+    summaryItems.forEach((item, i) => {
+      const x = 10 + i * colW + colW / 2;
+      doc.setFillColor(0, 15, 25);
+      doc.setDrawColor(0, 120, 140);
+      doc.setLineWidth(0.3);
+      doc.roundedRect(10 + i * colW, sy - 6, colW - 2, 14, 2, 2, 'FD');
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(6);
+      doc.setTextColor(80, 140, 160);
+      doc.text(item.label, x, sy - 0.5, { align: 'center' });
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8);
+      doc.setTextColor(0, 245, 255);
+      doc.text(truncate(item.value, 20), x, sy + 5, { align: 'center' });
+    });
+
+    // Column headers for question table
+    const tableTop = sy + 14;
+    const colWidths = [10, 8, 75, 65, 20, 18];
+    const colX = [10, 20, 28, 103, 168, 186];
+    const headers = ['Q#', '✓/✗', 'Question', 'Your Answer / Correct Answer', 'Category', 'Pts'];
+
+    doc.setFillColor(0, 30, 45);
+    doc.rect(10, tableTop, w - 20, 8, 'F');
+    headers.forEach((hdr, i) => {
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(6.5);
+      doc.setTextColor(0, 200, 220);
+      doc.text(hdr, colX[i] + colWidths[i] / 2, tableTop + 5, { align: 'center' });
+    });
+
+    // Rows — fit as many as possible on this page
+    const rowH = 9;
+    const maxRowsPage1 = Math.floor((h - tableTop - 20) / rowH);
+    const totalQ = result.questionOrder.length;
+
+    const drawRow = (qi: number, rowY: number) => {
+      const qIdx = result.questionOrder[qi];
+      const q = QUIZ_QUESTIONS[qIdx];
+      const userAns = result.answers[qi];
+      const correct = userAns === q.correctIndex;
+
+      // Row bg
+      doc.setFillColor(correct ? 0 : 30, correct ? 12 : 0, correct ? 0 : 0);
+      doc.setGState(doc.GState({ opacity: 0.4 }));
+      doc.rect(10, rowY, w - 20, rowH - 1, 'F');
+      doc.setGState(doc.GState({ opacity: 1 }));
+
+      // Q number
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(6.5);
+      doc.setTextColor(120, 160, 200);
+      doc.text(`${qi + 1}`, colX[0] + colWidths[0] / 2, rowY + 5.5, { align: 'center' });
+
+      // Tick / cross
+      doc.setTextColor(correct ? 0 : 255, correct ? 200 : 60, correct ? 80 : 80);
+      doc.text(correct ? '✓' : '✗', colX[1] + colWidths[1] / 2, rowY + 5.5, { align: 'center' });
+
+      // Question text
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(6);
+      doc.setTextColor(200, 220, 240);
+      doc.text(truncate(q.question, 72), colX[2], rowY + 5.5);
+
+      // Answer column
+      if (correct) {
+        doc.setTextColor(0, 200, 100);
+        doc.text(truncate(q.options[userAns], 58), colX[3], rowY + 5.5);
+      } else {
+        const yourLabel = userAns >= 0 ? truncate(q.options[userAns], 26) : 'Timed out';
+        const correctLabel = truncate(q.options[q.correctIndex], 26);
+        doc.setTextColor(255, 80, 100);
+        doc.text(`✗ ${yourLabel}`, colX[3], rowY + 3.5, { maxWidth: colWidths[3] });
+        doc.setTextColor(0, 200, 100);
+        doc.text(`✓ ${correctLabel}`, colX[3], rowY + 7.5, { maxWidth: colWidths[3] });
+      }
+
+      // Category
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(5.5);
+      doc.setTextColor(100, 160, 200);
+      doc.text(truncate(q.category, 14), colX[4] + colWidths[4] / 2, rowY + 5.5, { align: 'center' });
+
+      // Points
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(6.5);
+      doc.setTextColor(correct ? 0 : 255, correct ? 220 : 80, correct ? 100 : 80);
+      doc.text(correct ? '1' : '0', colX[5] + colWidths[5] / 2, rowY + 5.5, { align: 'center' });
+
+      // Divider
+      doc.setDrawColor(0, 40, 55);
+      doc.setLineWidth(0.2);
+      doc.line(10, rowY + rowH - 0.5, w - 10, rowY + rowH - 0.5);
+    };
+
+    // Draw rows for page 1
+    const page1Rows = Math.min(maxRowsPage1, totalQ);
+    for (let i = 0; i < page1Rows; i++) {
+      drawRow(i, tableTop + 8 + i * rowH);
+    }
+
+    // ── Continue on page 2 if more questions remain ────────────────────────
+    if (totalQ > page1Rows) {
+      doc.addPage();
+      darkBg();
+      drawGrid();
+      doc.setDrawColor(0, 200, 220);
+      doc.setLineWidth(1.5);
+      doc.roundedRect(5, 5, w - 10, h - 10, 3, 3, 'S');
+      doc.setDrawColor(191, 0, 255);
+      doc.setLineWidth(0.4);
+      doc.roundedRect(8, 8, w - 16, h - 16, 2, 2, 'S');
+
+      // Continuation header
+      doc.setFillColor(0, 20, 35);
+      doc.rect(8, 8, w - 16, 16, 'F');
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9);
+      doc.setTextColor(0, 245, 255);
+      doc.text('GIT CYBER ACADEMY  —  QUIZ REPORT (continued)', cx, 18, { align: 'center' });
+
+      // Column headers again
+      const p2TableTop = 28;
+      doc.setFillColor(0, 30, 45);
+      doc.rect(10, p2TableTop, w - 20, 8, 'F');
+      headers.forEach((hdr, i) => {
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(6.5);
+        doc.setTextColor(0, 200, 220);
+        doc.text(hdr, colX[i] + colWidths[i] / 2, p2TableTop + 5, { align: 'center' });
+      });
+
+      const maxRowsPage2 = Math.floor((h - p2TableTop - 20) / rowH);
+      const page2End = Math.min(page1Rows + maxRowsPage2, totalQ);
+      for (let i = page1Rows; i < page2End; i++) {
+        drawRow(i, p2TableTop + 8 + (i - page1Rows) * rowH);
+      }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // FINAL PAGE — CERTIFICATE
+    // ════════════════════════════════════════════════════════════════════════
+    doc.addPage();
+    darkBg();
 
     // Subtle grid lines
     doc.setDrawColor(0, 60, 80);
@@ -507,8 +695,6 @@ async function generateCertificate(result: QuizResult) {
     doc.text('Git & GitHub for Absolute Beginners', cx, hexY + 83, { align: 'center' });
 
     // ── Score badge ──
-    const pct = Math.round((result.score / result.total) * 100);
-    const grade = pct >= 90 ? 'S' : pct >= 80 ? 'A' : pct >= 70 ? 'B' : pct >= 60 ? 'C' : 'F';
     const scoreY = hexY + 100;
 
     // Score pill background
@@ -529,7 +715,6 @@ async function generateCertificate(result: QuizResult) {
     doc.line(cx - 80, bottomY, cx + 80, bottomY);
 
     // ── Date + signature area ──
-    const dateStr = new Date(result.completedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(8);
     doc.setTextColor(80, 120, 160);
@@ -541,9 +726,9 @@ async function generateCertificate(result: QuizResult) {
     doc.setLineWidth(0.3);
     doc.line(cx, bottomY + 3, cx, bottomY + 10);
 
-    doc.save(`git-certificate-${result.name.toLowerCase().replace(/\s+/g, '-')}.pdf`);
+    doc.save(`git-report-${result.name.toLowerCase().replace(/\s+/g, '-')}.pdf`);
   } catch (e) {
-    console.error('Certificate generation failed:', e);
-    alert('Certificate download failed. Try again.');
+    console.error('PDF generation failed:', e);
+    alert('PDF download failed. Try again.');
   }
 }

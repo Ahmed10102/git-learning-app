@@ -27,21 +27,14 @@ export function useProgress() {
 
   // Use fetch with keepalive so the request survives component unmount / page navigation
   const syncProgressToSupabase = useCallback((p: Progress, studentName?: string) => {
-    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-    if (typeof window === 'undefined' || !url || !key) return;
+    if (typeof window === 'undefined') return;
     try {
       const sessionId = getSessionId();
       const name = studentName || p.quizResult?.name || 'Anonymous';
-      fetch(`${url}/rest/v1/student_progress`, {
+      fetch('/api/save-progress', {
         method: 'POST',
         keepalive: true,
-        headers: {
-          'Content-Type': 'application/json',
-          'apikey': key,
-          'Authorization': `Bearer ${key}`,
-          'Prefer': 'resolution=merge-duplicates,return=minimal',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_id: sessionId,
           student_name: name,
@@ -49,9 +42,9 @@ export function useProgress() {
           last_visited: p.lastVisited ?? null,
           last_updated: new Date().toISOString(),
         }),
-      }).catch(e => console.warn('Supabase progress sync failed:', e));
+      }).catch(e => console.warn('Progress sync failed:', e));
     } catch (e) {
-      console.warn('Supabase progress sync failed (offline?):', e);
+      console.warn('Progress sync failed (offline?):', e);
     }
   }, []);
 
