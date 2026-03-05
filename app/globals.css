@@ -392,3 +392,37 @@ code {
   --color-background: #010208;
   --color-foreground: #f0f8ff;
 }
+
+/* ─── Mission Terminal ────────────────────────────────────────────────────── */
+
+.mission-step {
+  transition: all 0.3s ease;
+}
+
+.mission-step.active {
+  animation: mission-step-glow 2s ease-in-out infinite alternate;
+}
+
+@keyframes mission-step-glow {
+  from { box-shadow: 0 0 6px rgba(0,245,255,0.08); }
+  to   { box-shadow: 0 0 18px rgba(0,245,255,0.22); }
+}
+
+.mission-step.completed {
+  animation: mission-step-complete 0.4s ease forwards;
+}
+
+@keyframes mission-step-complete {
+  0%   { transform: scale(1); }
+  50%  { transform: scale(1.03); }
+  100% { transform: scale(1); }
+}
+
+.mission-complete {
+  animation: mission-complete-in 0.5s ease forwards;
+}
+
+@keyframes mission-complete-in {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}

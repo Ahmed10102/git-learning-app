@@ -1,9 +1,13 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState, lazy, Suspense } from 'react';
 import type { CommandInfo } from '@/lib/types';
+import { MISSIONS } from '@/lib/missions';
 import CodeBlock from './CodeBlock';
 import CopyButton from './CopyButton';
+
+// Dynamic import — MissionTerminal uses browser-only APIs (LightningFS)
+const MissionTerminal = lazy(() => import('@/components/mission/MissionTerminal'));
 
 const COLOR_MAP = {
   cyan: { text: 'var(--neon-cyan)', border: 'rgba(0,245,255,0.3)', bg: 'rgba(0,245,255,0.08)', glow: 'rgba(0,245,255,0.2)' },
@@ -23,9 +27,16 @@ interface CommandLessonProps {
 export default function CommandLesson({ command, onComplete, onTryInPlayground, isCompleted }: CommandLessonProps) {
   const colors = COLOR_MAP[command.color];
   const ref = useRef<HTMLDivElement>(null);
+  const [missionOpen, setMissionOpen] = useState(false);
+  const mission = MISSIONS[command.id] ?? null;
 
   useEffect(() => {
     ref.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [command.id]);
+
+  // Close mission panel when lesson changes
+  useEffect(() => {
+    setMissionOpen(false);
   }, [command.id]);
 
   return (
@@ -191,7 +202,81 @@ export default function CommandLesson({ command, onComplete, onTryInPlayground, 
             ✓ Mark as Learned
           </button>
         )}
+        {mission && !missionOpen && (
+          <button
+            onClick={() => setMissionOpen(true)}
+            style={{
+              padding: '10px 20px',
+              borderRadius: '10px',
+              background: 'rgba(191,0,255,0.12)',
+              border: '1px solid rgba(191,0,255,0.45)',
+              color: 'var(--neon-purple)',
+              fontFamily: 'var(--font-mono)',
+              fontSize: '0.85rem',
+              cursor: 'pointer',
+              boxShadow: '0 0 12px rgba(191,0,255,0.2)',
+              transition: 'all 0.2s ease',
+            }}
+          >
+            🎯 Start Mission
+          </button>
+        )}
       </div>
+
+      {/* Mission Terminal */}
+      {mission && missionOpen && (
+        <div style={{ marginTop: '24px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
+            <h2 style={{
+              fontFamily: 'var(--font-display)',
+              fontSize: '0.95rem',
+              color: 'var(--neon-purple)',
+              letterSpacing: '0.08em',
+              margin: 0,
+            }}>
+              {mission.scene} GUIDED MISSION
+            </h2>
+            <button
+              onClick={() => setMissionOpen(false)}
+              style={{
+                background: 'transparent',
+                border: '1px solid rgba(150,180,220,0.2)',
+                borderRadius: '6px',
+                padding: '3px 10px',
+                color: 'var(--text-muted)',
+                fontFamily: 'var(--font-mono)',
+                fontSize: '0.72rem',
+                cursor: 'pointer',
+              }}
+            >
+              ✕ Close
+            </button>
+          </div>
+          <Suspense fallback={
+            <div style={{
+              height: '200px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: 'var(--neon-cyan)',
+              fontFamily: 'var(--font-mono)',
+              fontSize: '0.85rem',
+              background: 'rgba(5,8,25,0.7)',
+              borderRadius: '12px',
+              border: '1px solid rgba(0,245,255,0.15)',
+            }}>
+              Loading mission environment...
+            </div>
+          }>
+            <MissionTerminal
+              mission={mission}
+              onMissionComplete={() => {
+                if (!isCompleted) onComplete();
+              }}
+            />
+          </Suspense>
+        </div>
+      )}
     </div>
   );
 }
