@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { QUIZ_QUESTIONS } from '@/lib/data';
 import type { QuizResult } from '@/lib/types';
+import { supabase, getSessionId } from '@/lib/supabase';
 
 interface QuizProps {
   onComplete: (result: QuizResult) => void;
@@ -11,22 +12,35 @@ interface QuizProps {
 
 type QuizPhase = 'intro' | 'running' | 'finished';
 
+function shuffleArray<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
 export default function Quiz({ onComplete, existingResult }: QuizProps) {
   const [phase, setPhase] = useState<QuizPhase>(existingResult ? 'finished' : 'intro');
   const [name, setName] = useState(existingResult?.name || '');
   const [currentQ, setCurrentQ] = useState(0);
   const [selectedAnswers, setSelectedAnswers] = useState<number[]>([]);
   const [answered, setAnswered] = useState(false);
-  const [timeLeft, setTimeLeft] = useState(20 * 60); // 20 minutes
+  const [timeLeft, setTimeLeft] = useState(20 * 60);
   const [startTime, setStartTime] = useState(0);
   const [result, setResult] = useState<QuizResult | null>(existingResult || null);
+  // questionOrder holds the shuffled indices into QUIZ_QUESTIONS
+  const [questionOrder, setQuestionOrder] = useState<number[]>(
+    existingResult?.questionOrder ?? QUIZ_QUESTIONS.map((_, i) => i)
+  );
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const question = QUIZ_QUESTIONS[currentQ];
+  const orderedQuestion = QUIZ_QUESTIONS[questionOrder[currentQ]];
 
-  const finishQuiz = useCallback((answers: number[], timeTaken: number, quizName: string) => {
+  const finishQuiz = useCallback(async (answers: number[], timeTaken: number, quizName: string, order: number[]) => {
     const score = answers.reduce((acc, ans, i) => {
-      return acc + (ans === QUIZ_QUESTIONS[i].correctIndex ? 1 : 0);
+      return acc + (ans === QUIZ_QUESTIONS[order[i]].correctIndex ? 1 : 0);
     }, 0);
 
     const quizResult: QuizResult = {
@@ -35,6 +49,7 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
       total: QUIZ_QUESTIONS.length,
       timeTaken,
       answers,
+      questionOrder: order,
       completedAt: new Date().toISOString(),
     };
 
@@ -42,8 +57,22 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
     setPhase('finished');
     onComplete(quizResult);
 
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
+    if (intervalRef.current) clearInterval(intervalRef.current);
+
+    // Save to Supabase (fire-and-forget, don't block UI)
+    try {
+      const sessionId = getSessionId();
+      await supabase.from('quiz_results').insert({
+        student_name: quizName,
+        session_id: sessionId,
+        score,
+        total: QUIZ_QUESTIONS.length,
+        time_taken: timeTaken,
+        answers,
+        question_order: order,
+      });
+    } catch (e) {
+      console.warn('Supabase quiz save failed (offline?):', e);
     }
   }, [onComplete]);
 
@@ -55,20 +84,21 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
             clearInterval(intervalRef.current!);
             const timeTaken = Math.round((Date.now() - startTime) / 1000);
             const padded = [...selectedAnswers, ...Array(QUIZ_QUESTIONS.length - selectedAnswers.length).fill(-1)];
-            finishQuiz(padded, timeTaken, name);
+            finishQuiz(padded, timeTaken, name, questionOrder);
             return 0;
           }
           return prev - 1;
         });
       }, 1000);
     }
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [phase, startTime, selectedAnswers, name, finishQuiz]);
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase]);
 
   const startQuiz = () => {
     if (!name.trim()) return;
+    const order = shuffleArray(QUIZ_QUESTIONS.map((_, i) => i));
+    setQuestionOrder(order);
     setPhase('running');
     setCurrentQ(0);
     setSelectedAnswers([]);
@@ -86,7 +116,7 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
   const nextQuestion = () => {
     if (currentQ >= QUIZ_QUESTIONS.length - 1) {
       const timeTaken = Math.round((Date.now() - startTime) / 1000);
-      finishQuiz(selectedAnswers, timeTaken, name);
+      finishQuiz(selectedAnswers, timeTaken, name, questionOrder);
     } else {
       setCurrentQ(q => q + 1);
       setAnswered(false);
@@ -100,9 +130,9 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
   };
 
   const currentAnswer = selectedAnswers[currentQ];
-  const isCorrect = answered && currentAnswer === question?.correctIndex;
+  const isCorrect = answered && currentAnswer === orderedQuestion?.correctIndex;
 
-  // Score display
+  // ── FINISHED ──────────────────────────────────────────────────────────────
   if (phase === 'finished' && result) {
     const pct = Math.round((result.score / result.total) * 100);
     const grade = pct >= 90 ? 'S' : pct >= 80 ? 'A' : pct >= 70 ? 'B' : pct >= 60 ? 'C' : 'F';
@@ -117,22 +147,17 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
           <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', marginBottom: '16px', letterSpacing: '0.15em' }}>
             MISSION COMPLETE — CYBER ACADEMY
           </div>
-          
+
           <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '24px', flexWrap: 'wrap', marginBottom: '20px' }}>
-            {/* Grade badge */}
             <div style={{
-              width: '80px', height: '80px',
-              borderRadius: '50%',
-              border: `3px solid ${gradeColor}`,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              boxShadow: `0 0 30px ${gradeColor}60`,
-              background: `${gradeColor}15`,
+              width: '80px', height: '80px', borderRadius: '50%',
+              border: `3px solid ${gradeColor}`, display: 'flex', alignItems: 'center', justifyContent: 'center',
+              boxShadow: `0 0 30px ${gradeColor}60`, background: `${gradeColor}15`,
             }}>
               <span style={{ fontFamily: 'var(--font-display)', fontSize: '2.5rem', color: gradeColor, textShadow: `0 0 15px ${gradeColor}` }}>
                 {grade}
               </span>
             </div>
-
             <div style={{ textAlign: 'left' }}>
               <h2 style={{ fontFamily: 'var(--font-display)', fontSize: '1.5rem', color: gradeColor, marginBottom: '8px', textShadow: `0 0 15px ${gradeColor}` }}>
                 {result.name}
@@ -159,37 +184,34 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
 
           <div style={{ display: 'flex', gap: '12px', justifyContent: 'center', flexWrap: 'wrap' }}>
             <button
-              onClick={() => {
-                setPhase('intro');
-                setSelectedAnswers([]);
-                setCurrentQ(0);
-                setAnswered(false);
-              }}
-              className="btn-neon-cyan px-6 py-2 rounded-xl"
+              onClick={() => { setPhase('intro'); setSelectedAnswers([]); setCurrentQ(0); setAnswered(false); }}
+              className="btn-neon-cyan"
+              style={{ padding: '10px 24px', borderRadius: '12px' }}
             >
               ↺ Retake Quiz
             </button>
             <button
               onClick={() => generateCertificate(result)}
-              className="btn-neon-green px-6 py-2 rounded-xl"
+              className="btn-neon-green"
+              style={{ padding: '10px 24px', borderRadius: '12px' }}
             >
               🏆 Download Certificate
             </button>
           </div>
         </div>
 
-        {/* Answers Review */}
+        {/* Answer Review */}
         <div>
           <h3 style={{ fontFamily: 'var(--font-display)', fontSize: '0.9rem', color: 'var(--neon-cyan)', marginBottom: '12px', letterSpacing: '0.1em' }}>
             REVIEW YOUR ANSWERS
           </h3>
-          {QUIZ_QUESTIONS.map((q, i) => {
+          {result.questionOrder.map((qIdx, i) => {
+            const q = QUIZ_QUESTIONS[qIdx];
             const userAnswer = result.answers[i];
             const correct = userAnswer === q.correctIndex;
             return (
               <div key={q.id} className="glass-card" style={{
-                padding: '16px 20px',
-                marginBottom: '10px',
+                padding: '16px 20px', marginBottom: '10px',
                 borderColor: correct ? 'rgba(0,255,136,0.25)' : 'rgba(255,68,102,0.25)',
               }}>
                 <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', marginBottom: '8px' }}>
@@ -220,7 +242,7 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
     );
   }
 
-  // Intro screen
+  // ── INTRO ─────────────────────────────────────────────────────────────────
   if (phase === 'intro') {
     return (
       <div style={{ maxWidth: '600px', margin: '0 auto' }}>
@@ -230,22 +252,16 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
             FINAL QUIZ
           </h2>
           <p style={{ color: 'var(--text-dim)', marginBottom: '8px', lineHeight: 1.6 }}>
-            20 multiple-choice questions covering everything you've learned.
+            20 multiple-choice questions — randomised every attempt.
           </p>
           <div style={{ display: 'flex', justifyContent: 'center', gap: '20px', margin: '16px 0', flexWrap: 'wrap' }}>
-            {[
-              { icon: '⏱️', text: '20 min limit' },
-              { icon: '❓', text: '20 questions' },
-              { icon: '🏆', text: 'Get a certificate' },
-            ].map(item => (
+            {[{ icon: '⏱️', text: '20 min limit' }, { icon: '🔀', text: 'Random order' }, { icon: '🏆', text: 'Get a certificate' }].map(item => (
               <div key={item.text} style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-dim)', fontSize: '0.85rem' }}>
-                <span>{item.icon}</span>
-                <span>{item.text}</span>
+                <span>{item.icon}</span><span>{item.text}</span>
               </div>
             ))}
           </div>
         </div>
-
         <div className="glass-card" style={{ padding: '24px' }}>
           <label style={{ display: 'block', fontSize: '0.75rem', color: 'var(--neon-cyan)', fontFamily: 'var(--font-mono)', marginBottom: '8px', letterSpacing: '0.1em' }}>
             ENTER YOUR NAME
@@ -257,30 +273,16 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
             onKeyDown={e => e.key === 'Enter' && name.trim() && startQuiz()}
             placeholder="Your name here..."
             style={{
-              width: '100%',
-              background: 'rgba(0,0,0,0.4)',
-              border: '1px solid rgba(0,245,255,0.3)',
-              borderRadius: '10px',
-              padding: '12px 16px',
-              color: 'var(--text-bright)',
-              fontFamily: 'var(--font-body)',
-              fontSize: '1rem',
-              outline: 'none',
-              marginBottom: '16px',
+              width: '100%', background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(0,245,255,0.3)',
+              borderRadius: '10px', padding: '12px 16px', color: 'var(--text-bright)',
+              fontFamily: 'var(--font-body)', fontSize: '1rem', outline: 'none', marginBottom: '16px',
             }}
           />
           <button
             onClick={startQuiz}
             disabled={!name.trim()}
             className="btn-neon-cyan"
-            style={{
-              width: '100%',
-              padding: '14px',
-              borderRadius: '12px',
-              fontSize: '1rem',
-              opacity: name.trim() ? 1 : 0.5,
-              cursor: name.trim() ? 'pointer' : 'not-allowed',
-            }}
+            style={{ width: '100%', padding: '14px', borderRadius: '12px', fontSize: '1rem', opacity: name.trim() ? 1 : 0.5, cursor: name.trim() ? 'pointer' : 'not-allowed' }}
           >
             🚀 Start Quiz
           </button>
@@ -289,59 +291,44 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
     );
   }
 
-  // Running
+  // ── RUNNING ───────────────────────────────────────────────────────────────
   return (
     <div style={{ maxWidth: '700px', margin: '0 auto' }}>
-      {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '10px' }}>
         <div>
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
             Question {currentQ + 1} of {QUIZ_QUESTIONS.length}
           </span>
           <span style={{ marginLeft: '12px', fontSize: '0.75rem', color: 'var(--neon-cyan)', fontFamily: 'var(--font-mono)', background: 'rgba(0,245,255,0.08)', padding: '2px 8px', borderRadius: '12px', border: '1px solid rgba(0,245,255,0.2)' }}>
-            {question.category}
+            {orderedQuestion.category}
           </span>
         </div>
-        <div style={{
-          fontFamily: 'var(--font-display)',
-          fontSize: '1.1rem',
-          color: timeLeft < 60 ? '#ff4466' : timeLeft < 300 ? 'var(--neon-yellow)' : 'var(--neon-cyan)',
-          textShadow: `0 0 10px ${timeLeft < 60 ? '#ff4466' : 'var(--neon-cyan)'}`,
-        }}>
+        <div style={{ fontFamily: 'var(--font-display)', fontSize: '1.1rem', color: timeLeft < 60 ? '#ff4466' : timeLeft < 300 ? '#ffaa00' : 'var(--neon-cyan)', textShadow: `0 0 10px ${timeLeft < 60 ? '#ff4466' : 'var(--neon-cyan)'}` }}>
           ⏱ {formatTime(timeLeft)}
         </div>
       </div>
 
-      {/* Progress */}
       <div className="progress-bar" style={{ marginBottom: '20px' }}>
-        <div className="progress-fill" style={{ width: `${((currentQ) / QUIZ_QUESTIONS.length) * 100}%` }} />
+        <div className="progress-fill" style={{ width: `${(currentQ / QUIZ_QUESTIONS.length) * 100}%` }} />
       </div>
 
-      {/* Question */}
       <div className="glass-card" style={{ padding: '24px 28px', marginBottom: '16px' }}>
         <p style={{ fontSize: '1.1rem', color: 'var(--text-bright)', lineHeight: 1.7, fontWeight: 500 }}>
-          {question.question}
+          {orderedQuestion.question}
         </p>
       </div>
 
-      {/* Options */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '16px' }}>
-        {question.options.map((option, i) => {
+        {orderedQuestion.options.map((option, i) => {
           let className = 'quiz-option';
           if (answered) {
-            if (i === question.correctIndex) className += ' correct';
-            else if (i === currentAnswer && currentAnswer !== question.correctIndex) className += ' incorrect';
-            else className += ' ';
+            if (i === orderedQuestion.correctIndex) className += ' correct';
+            else if (i === currentAnswer && currentAnswer !== orderedQuestion.correctIndex) className += ' incorrect';
           } else if (i === currentAnswer) {
             className += ' selected';
           }
           return (
-            <button
-              key={i}
-              className={className}
-              onClick={() => selectAnswer(i)}
-              disabled={answered}
-            >
+            <button key={i} className={className} onClick={() => selectAnswer(i)} disabled={answered}>
               <span style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', marginRight: '10px', fontSize: '0.85rem' }}>
                 {String.fromCharCode(65 + i)}.
               </span>
@@ -351,12 +338,10 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
         })}
       </div>
 
-      {/* Explanation + Next */}
       {answered && (
         <div style={{ animation: 'fadeInUp 0.3s ease' }}>
           <div className="glass-card" style={{
-            padding: '16px 20px',
-            marginBottom: '16px',
+            padding: '16px 20px', marginBottom: '16px',
             borderColor: isCorrect ? 'rgba(0,255,136,0.3)' : 'rgba(255,68,102,0.3)',
             background: isCorrect ? 'rgba(0,255,136,0.05)' : 'rgba(255,68,102,0.05)',
           }}>
@@ -367,17 +352,12 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
                   {isCorrect ? 'Correct!' : 'Not quite!'}
                 </div>
                 <p style={{ color: 'var(--text-dim)', fontSize: '0.88rem', lineHeight: 1.6 }}>
-                  {question.explanation}
+                  {orderedQuestion.explanation}
                 </p>
               </div>
             </div>
           </div>
-
-          <button
-            onClick={nextQuestion}
-            className="btn-neon-cyan"
-            style={{ width: '100%', padding: '12px', borderRadius: '12px', fontSize: '1rem' }}
-          >
+          <button onClick={nextQuestion} className="btn-neon-cyan" style={{ width: '100%', padding: '12px', borderRadius: '12px', fontSize: '1rem' }}>
             {currentQ >= QUIZ_QUESTIONS.length - 1 ? '🏁 See Results' : 'Next Question →'}
           </button>
         </div>
@@ -386,81 +366,164 @@ export default function Quiz({ onComplete, existingResult }: QuizProps) {
   );
 }
 
+// ── CERTIFICATE ─────────────────────────────────────────────────────────────
 async function generateCertificate(result: QuizResult) {
   try {
     const { default: jsPDF } = await import('jspdf');
     const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
-
     const w = doc.internal.pageSize.getWidth();
     const h = doc.internal.pageSize.getHeight();
+    const cx = w / 2;
 
-    // Background
-    doc.setFillColor(1, 2, 8);
+    // ── Background ──
+    doc.setFillColor(2, 4, 16);
     doc.rect(0, 0, w, h, 'F');
 
-    // Outer border
-    doc.setDrawColor(0, 245, 255);
-    doc.setLineWidth(2);
-    doc.rect(8, 8, w - 16, h - 16);
-    doc.setLineWidth(0.5);
-    doc.rect(10, 10, w - 20, h - 20);
+    // Subtle grid lines
+    doc.setDrawColor(0, 60, 80);
+    doc.setLineWidth(0.15);
+    for (let x = 0; x <= w; x += 12) { doc.line(x, 0, x, h); }
+    for (let y = 0; y <= h; y += 12) { doc.line(0, y, w, y); }
 
-    // Corner decorations
-    const corners = [[12, 12], [w - 12, 12], [12, h - 12], [w - 12, h - 12]];
-    corners.forEach(([cx, cy]) => {
+    // Re-darken over grid for cleaner look
+    doc.setFillColor(2, 4, 16);
+    doc.setGState(doc.GState({ opacity: 0.7 }));
+    doc.rect(0, 0, w, h, 'F');
+    doc.setGState(doc.GState({ opacity: 1 }));
+
+    // ── Outer glow border ──
+    doc.setDrawColor(0, 200, 220);
+    doc.setLineWidth(3);
+    doc.roundedRect(6, 6, w - 12, h - 12, 4, 4, 'S');
+    doc.setDrawColor(0, 245, 255);
+    doc.setLineWidth(0.8);
+    doc.roundedRect(9, 9, w - 18, h - 18, 3, 3, 'S');
+
+    // Inner thin accent border
+    doc.setDrawColor(191, 0, 255);
+    doc.setLineWidth(0.4);
+    doc.roundedRect(12, 12, w - 24, h - 24, 2, 2, 'S');
+
+    // ── Corner ornaments ──
+    const drawCorner = (x: number, y: number, flipX: boolean, flipY: boolean) => {
+      const sx = flipX ? -1 : 1;
+      const sy = flipY ? -1 : 1;
       doc.setDrawColor(0, 245, 255);
-      doc.setLineWidth(1.5);
-      doc.circle(cx, cy, 3);
-    });
+      doc.setLineWidth(1.2);
+      doc.circle(x, y, 2.5, 'S');
+      doc.setLineWidth(0.6);
+      doc.line(x, y, x + sx * 10, y);
+      doc.line(x, y, x, y + sy * 10);
+      doc.setDrawColor(191, 0, 255);
+      doc.setLineWidth(0.4);
+      doc.circle(x, y, 4.5, 'S');
+    };
+    drawCorner(14, 14, false, false);
+    drawCorner(w - 14, 14, true, false);
+    drawCorner(14, h - 14, false, true);
+    drawCorner(w - 14, h - 14, true, true);
 
-    // Title
+    // ── Top decorative hex badge ──
+    const hexY = 26;
+    doc.setDrawColor(0, 245, 255);
+    doc.setLineWidth(0.8);
+    doc.circle(cx, hexY, 7, 'S');
+    doc.setFillColor(0, 20, 30);
+    doc.circle(cx, hexY, 6.5, 'F');
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(10);
+    doc.setFontSize(7);
     doc.setTextColor(0, 245, 255);
-    doc.text('GIT CYBER ACADEMY', w / 2, 28, { align: 'center' });
+    doc.text('⚡', cx, hexY + 2.5, { align: 'center' });
 
-    doc.setFontSize(24);
-    doc.setTextColor(240, 248, 255);
-    doc.text('CERTIFICATE OF COMPLETION', w / 2, 48, { align: 'center' });
-
-    doc.setFontSize(11);
-    doc.setTextColor(150, 180, 220);
-    doc.setFont('helvetica', 'normal');
-    doc.text('This certifies that', w / 2, 62, { align: 'center' });
-
-    // Name
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(32);
-    doc.setTextColor(0, 245, 255);
-    doc.text(result.name, w / 2, 82, { align: 'center' });
-
-    // Line
+    // Horizontal divider line after badge
     doc.setDrawColor(0, 245, 255);
     doc.setLineWidth(0.5);
-    doc.line(w / 2 - 60, 87, w / 2 + 60, 87);
+    doc.line(cx - 50, hexY + 10, cx + 50, hexY + 10);
 
+    // ── Academy name ──
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+    doc.setTextColor(0, 245, 255);
+    doc.text('G I T   C Y B E R   A C A D E M Y', cx, hexY + 17, { align: 'center' });
+
+    // ── Main title ──
+    doc.setFontSize(22);
+    doc.setTextColor(220, 240, 255);
+    doc.text('CERTIFICATE OF COMPLETION', cx, hexY + 30, { align: 'center' });
+
+    // Decorative underline for title
+    doc.setDrawColor(191, 0, 255);
+    doc.setLineWidth(0.6);
+    doc.line(cx - 65, hexY + 33, cx + 65, hexY + 33);
+
+    // ── "This certifies that" ──
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(11);
-    doc.setTextColor(150, 180, 220);
-    doc.text('has successfully completed', w / 2, 98, { align: 'center' });
+    doc.setFontSize(10);
+    doc.setTextColor(120, 160, 200);
+    doc.text('This certifies that', cx, hexY + 43, { align: 'center' });
 
+    // ── Student name ──
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(30);
+    doc.setTextColor(0, 245, 255);
+    // Glow effect via layered text
+    doc.setTextColor(0, 100, 120);
+    doc.text(result.name, cx + 0.5, hexY + 59.5, { align: 'center' });
+    doc.setTextColor(0, 245, 255);
+    doc.text(result.name, cx, hexY + 59, { align: 'center' });
+
+    // Name underline
+    const nameWidth = Math.min(result.name.length * 5.5, 140);
+    doc.setDrawColor(0, 245, 255);
+    doc.setLineWidth(0.8);
+    doc.line(cx - nameWidth / 2, hexY + 62, cx + nameWidth / 2, hexY + 62);
+
+    // ── "has successfully completed" ──
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    doc.setTextColor(120, 160, 200);
+    doc.text('has successfully completed', cx, hexY + 72, { align: 'center' });
+
+    // ── Course name ──
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(16);
-    doc.setTextColor(240, 248, 255);
-    doc.text('Git & GitHub for Absolute Beginners', w / 2, 112, { align: 'center' });
+    doc.setTextColor(255, 255, 255);
+    doc.text('Git & GitHub for Absolute Beginners', cx, hexY + 83, { align: 'center' });
 
-    // Score
+    // ── Score badge ──
     const pct = Math.round((result.score / result.total) * 100);
-    doc.setFontSize(13);
-    doc.setTextColor(0, 255, 136);
-    doc.text(`Final Score: ${result.score}/${result.total} (${pct}%)`, w / 2, 128, { align: 'center' });
+    const grade = pct >= 90 ? 'S' : pct >= 80 ? 'A' : pct >= 70 ? 'B' : pct >= 60 ? 'C' : 'F';
+    const scoreY = hexY + 100;
 
-    // Date
-    doc.setFontSize(9);
-    doc.setTextColor(100, 140, 180);
+    // Score pill background
+    doc.setFillColor(0, 30, 40);
+    doc.setDrawColor(0, 255, 136);
+    doc.setLineWidth(0.8);
+    doc.roundedRect(cx - 55, scoreY - 7, 110, 14, 7, 7, 'FD');
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11);
+    doc.setTextColor(0, 255, 136);
+    doc.text(`Score: ${result.score}/${result.total}  (${pct}%)   Grade: ${grade}`, cx, scoreY + 2, { align: 'center' });
+
+    // ── Bottom divider ──
+    const bottomY = h - 28;
+    doc.setDrawColor(0, 245, 255);
+    doc.setLineWidth(0.4);
+    doc.line(cx - 80, bottomY, cx + 80, bottomY);
+
+    // ── Date + signature area ──
     const dateStr = new Date(result.completedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-    doc.text(`Issued on ${dateStr}`, w / 2, h - 22, { align: 'center' });
-    doc.text('git-cyber-academy.dev', w / 2, h - 16, { align: 'center' });
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(80, 120, 160);
+    doc.text(`Issued: ${dateStr}`, cx - 40, bottomY + 7, { align: 'center' });
+    doc.text('git-cyber-academy.dev', cx + 40, bottomY + 7, { align: 'center' });
+
+    // Vertical separator between date and domain
+    doc.setDrawColor(40, 80, 100);
+    doc.setLineWidth(0.3);
+    doc.line(cx, bottomY + 3, cx, bottomY + 10);
 
     doc.save(`git-certificate-${result.name.toLowerCase().replace(/\s+/g, '-')}.pdf`);
   } catch (e) {

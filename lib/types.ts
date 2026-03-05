@@ -72,6 +72,7 @@ export interface QuizResult {
   total: number;
   timeTaken: number;
   answers: number[];
+  questionOrder: number[]; // indices into QUIZ_QUESTIONS, shuffled
   completedAt: string;
 }
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import dynamic from 'next/dynamic';
 import MatrixBackground from '@/components/ui/MatrixBackground';
 import Sidebar from '@/components/ui/Sidebar';
@@ -47,6 +47,11 @@ const Quiz = dynamic(
   }
 );
 
+const TeacherDashboard = dynamic(
+  () => import('@/components/teacher/TeacherDashboard'),
+  { ssr: false }
+);
+
 const COMMAND_SECTIONS: Section[] = [
   'git-init', 'git-status', 'git-add', 'git-commit', 'git-log',
   'git-branch', 'git-merge', 'gitignore', 'git-clone', 'git-remote', 'git-push-pull'
@@ -56,7 +61,36 @@ export default function Home() {
   const [activeSection, setActiveSection] = useState<Section>('hero');
   const [playgroundCmd, setPlaygroundCmd] = useState<string | undefined>();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [showTeacher, setShowTeacher] = useState(false);
   const { progress, markCompleted, saveQuizResult } = useProgress();
+  const keyBufferRef = useRef('');
+
+  // Secret teacher dashboard trigger: type "teacher" anywhere on the page
+  useEffect(() => {
+    const SECRET = 'teacher';
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ignore keypresses when typing in an input/textarea/select
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+      if (e.key === 'Escape') {
+        keyBufferRef.current = '';
+        setShowTeacher(false);
+        return;
+      }
+
+      if (e.key.length === 1) {
+        keyBufferRef.current = (keyBufferRef.current + e.key).slice(-SECRET.length);
+        if (keyBufferRef.current === SECRET) {
+          keyBufferRef.current = '';
+          setShowTeacher(true);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   const handleNavigate = useCallback((section: Section) => {
     setActiveSection(section);
@@ -304,6 +338,9 @@ export default function Home() {
           {renderContent()}
         </div>
       </main>
+
+      {/* Teacher dashboard overlay — triggered by typing "teacher" */}
+      {showTeacher && <TeacherDashboard onClose={() => setShowTeacher(false)} />}
     </div>
   );
 }
