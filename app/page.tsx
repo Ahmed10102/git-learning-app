@@ -148,7 +148,7 @@ export default function Home() {
       case 'quiz':
         return (
           <div style={{ paddingBottom: '40px' }}>
-            <div className="glass-card" style={{ padding: '20px 28px', marginBottom: '20px', borderColor: 'rgba(0,245,255,0.3)', maxWidth: '700px', margin: '0 auto 20px' }}>
+            <div className="glass-card" style={{ padding: '20px 28px', borderColor: 'rgba(0,245,255,0.3)', maxWidth: '700px', margin: '0 auto 20px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                 <span style={{ fontSize: '2rem' }}>🎯</span>
                 <h1 style={{ fontFamily: 'var(--font-display)', fontSize: 'clamp(1.2rem, 3vw, 1.6rem)', color: 'var(--neon-cyan)', letterSpacing: '0.05em' }}>
